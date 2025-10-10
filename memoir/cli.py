@@ -14,21 +14,34 @@ from .capture import capture_screenshot
 from .config import RESOLUTION_TIERS
 from .processor import process_with_ollama, warmup_model
 from .storage import setup_directories, save_log_entry, save_screenshot
+from .vector_store import VectorStore
+from .embeddings import create_embedding, warmup_embedding_model
+from .live_reload import start_live_reload, stop_live_reload
 
 
 # Global flag for graceful shutdown
 running = True
+# Global observer for live reload
+live_reload_observer = None
 
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully"""
-    global running
+    global running, live_reload_observer
     print("\n\n🛑 Shutting down gracefully...")
     running = False
+    if live_reload_observer:
+        stop_live_reload(live_reload_observer)
 
 
 def capture_and_process(
-    resolution_tier, save_images, logs_dir, screenshots_dir, model_name
+    resolution_tier,
+    save_images,
+    logs_dir,
+    screenshots_dir,
+    model_name,
+    vector_store=None,
+    embedding_model="embeddinggemma",
 ):
     """
     Main function to capture, process, and log a screenshot.
@@ -39,6 +52,8 @@ def capture_and_process(
         logs_dir: Path to logs directory
         screenshots_dir: Path to screenshots directory
         model_name: Ollama model name
+        vector_store: Optional VectorStore instance for semantic search
+        embedding_model: Embedding model name
 
     Returns:
         Dictionary with timing stats or None if failed
@@ -94,9 +109,15 @@ def capture_and_process(
         "total_processing_time_seconds": round(total_time, 3),
     }
 
-    # Save log entry
+    # Save log entry (with vector store if enabled)
     log_file = save_log_entry(
-        summary, resolution_tier, screenshot_path, logs_dir, all_stats
+        summary,
+        resolution_tier,
+        screenshot_path,
+        logs_dir,
+        all_stats,
+        vector_store=vector_store,
+        embedding_model=embedding_model,
     )
     if log_file:
         print(f"✅ Log saved: {log_file}")
@@ -105,7 +126,14 @@ def capture_and_process(
     return all_stats
 
 
-def compare_resolution_tiers(save_images, logs_dir, screenshots_dir, model_name):
+def compare_resolution_tiers(
+    save_images,
+    logs_dir,
+    screenshots_dir,
+    model_name,
+    vector_store=None,
+    embedding_model="embeddinggemma",
+):
     """
     Compare all three resolution tiers and display results.
     Only works in run-once mode.
@@ -115,6 +143,8 @@ def compare_resolution_tiers(save_images, logs_dir, screenshots_dir, model_name)
         logs_dir: Path to logs directory
         screenshots_dir: Path to screenshots directory
         model_name: Ollama model name
+        vector_store: Optional VectorStore instance
+        embedding_model: Embedding model name
     """
     print("\n" + "=" * 80)
     print("🔬 RESOLUTION TIER COMPARISON MODE")
@@ -131,7 +161,13 @@ def compare_resolution_tiers(save_images, logs_dir, screenshots_dir, model_name)
         print(f"{'='*80}")
 
         stats = capture_and_process(
-            tier, save_images, logs_dir, screenshots_dir, model_name
+            tier,
+            save_images,
+            logs_dir,
+            screenshots_dir,
+            model_name,
+            vector_store=vector_store,
+            embedding_model=embedding_model,
         )
         if stats:
             results[tier] = stats
@@ -227,14 +263,88 @@ def compare_resolution_tiers(save_images, logs_dir, screenshots_dir, model_name)
             print(f"{tier.upper():<15} {size_kb} KB")
 
 
+def search_memories(
+    query_text, vector_store, embedding_model="embeddinggemma", n_results=5
+):
+    """
+    Search memories using semantic search.
+
+    Args:
+        query_text: Search query
+        vector_store: VectorStore instance
+        embedding_model: Embedding model name
+        n_results: Number of results to return
+    """
+    print(f'\n🔍 Searching memories for: "{query_text}"')
+    print("=" * 80)
+
+    # Create embedding for query
+    print("🔄 Creating query embedding...")
+    query_embedding = create_embedding(query_text, embedding_model)
+
+    if not query_embedding:
+        print("❌ Failed to create query embedding")
+        return
+
+    # Search vector store
+    results = vector_store.search_by_text(query_text, query_embedding, n_results)
+
+    if not results:
+        print("📭 No results found")
+        return
+
+    # Display results
+    print("\n" + "=" * 80)
+    print(f"📊 Found {len(results)} similar memories:")
+    print("=" * 80)
+
+    for i, result in enumerate(results):
+        print(f"\n{'='*80}")
+        print(
+            f"Result #{i+1} - Distance: {round(result['distance'], 4)} - ID: {result['id']}"
+        )
+        print(f"{'='*80}")
+        print(f"Summary: {result['summary'][:300]}...")
+        if "timestamp" in result["metadata"]:
+            print(f"Timestamp: {result['metadata']['timestamp']}")
+        print()
+
+
 def run():
     """Main application entry point"""
-    global running
+    global running, live_reload_observer
 
     # Set up argument parser
     parser = argparse.ArgumentParser(
         description="Screenshot Memory System - Capture and analyze screen activity with Ollama"
     )
+
+    # Add subcommands (optional - for search)
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # Search command
+    search_parser = subparsers.add_parser(
+        "search", help="Search memories using semantic search"
+    )
+    search_parser.add_argument(
+        "query",
+        type=str,
+        help="Search query text",
+    )
+    search_parser.add_argument(
+        "--results",
+        type=int,
+        default=5,
+        help="Number of results to return (default: 5)",
+    )
+    search_parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="embeddinggemma",
+        help="Embedding model name (default: embeddinggemma)",
+    )
+
+    # Capture arguments (at top level for backward compatibility)
     parser.add_argument(
         "--resolution-tier",
         choices=["efficient", "balanced", "detailed"],
@@ -268,9 +378,51 @@ def run():
         action="store_true",
         help="Skip model warmup at startup (not recommended)",
     )
+    parser.add_argument(
+        "--disable-vectorization",
+        action="store_true",
+        help="Disable vectorization and vector database storage (vectorization is ON by default)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="embeddinggemma",
+        help="Embedding model name (default: embeddinggemma)",
+    )
+    parser.add_argument(
+        "--live-reload",
+        action="store_true",
+        help="Enable live reload on code changes",
+    )
 
+    # Parse arguments
     args = parser.parse_args()
 
+    # Default to capture if no command specified
+    if args.command is None:
+        args.command = "capture"
+
+    # Handle search command
+    if args.command == "search":
+        print("=" * 80)
+        print("🔍 Memory Search")
+        print("=" * 80)
+
+        # Initialize vector store
+        vector_store = VectorStore()
+
+        if vector_store.count() == 0:
+            print("📭 No memories in vector store yet!")
+            print(
+                "   Run with --enable-vectorization to start building your memory database"
+            )
+            return
+
+        # Perform search
+        search_memories(args.query, vector_store, args.embedding_model, args.results)
+        return
+
+    # Capture mode continues below
     # Validate arguments
     if args.compare_tiers and not args.run_once:
         print("❌ Error: --compare-tiers requires --run-once flag")
@@ -282,6 +434,15 @@ def run():
     # Create necessary directories
     logs_dir, screenshots_dir = setup_directories()
 
+    # Initialize vector store (enabled by default unless explicitly disabled)
+    vector_store = None
+    enable_vectorization = not args.disable_vectorization
+    if enable_vectorization:
+        vector_store = VectorStore()
+        print(f"🗄️  Vector store enabled: {vector_store.count()} memories stored")
+    else:
+        print("⚠️  Vector database disabled - search will not be available")
+
     print("=" * 60)
     print("📷 Screenshot Memory System")
     print("=" * 60)
@@ -290,15 +451,25 @@ def run():
             f"Resolution tier: {args.resolution_tier} ({RESOLUTION_TIERS[args.resolution_tier][0]}x{RESOLUTION_TIERS[args.resolution_tier][1]})"
         )
     print(f"Save images: {'Yes' if args.save_images else 'No'}")
+    print(f"Vectorization: {'Yes ✓' if enable_vectorization else 'No (disabled)'}")
     print(f"Interval: {args.interval} minute(s)")
     print(f"Model: {args.model}")
     print(f"Logs directory: {logs_dir.absolute()}")
     print("=" * 60)
 
-    # Warm up the model (unless disabled)
+    # Warm up the models (unless disabled)
     if not args.no_warmup:
         print()
         warmup_model(args.model)
+
+        # Warm up embedding model if vectorization is enabled
+        if enable_vectorization:
+            warmup_embedding_model(args.embedding_model)
+        print()
+
+    # Enable live reload if requested
+    if args.live_reload:
+        live_reload_observer = start_live_reload("memoir")
         print()
 
     if not args.run_once:
@@ -307,7 +478,12 @@ def run():
     # Compare tiers mode
     if args.compare_tiers:
         compare_resolution_tiers(
-            args.save_images, logs_dir, screenshots_dir, args.model
+            args.save_images,
+            logs_dir,
+            screenshots_dir,
+            args.model,
+            vector_store=vector_store,
+            embedding_model=args.embedding_model,
         )
         return
 
@@ -319,6 +495,8 @@ def run():
             logs_dir,
             screenshots_dir,
             args.model,
+            vector_store=vector_store,
+            embedding_model=args.embedding_model,
         )
         print("\n✅ Single capture completed!")
         return
@@ -331,11 +509,19 @@ def run():
         logs_dir=logs_dir,
         screenshots_dir=screenshots_dir,
         model_name=args.model,
+        vector_store=vector_store,
+        embedding_model=args.embedding_model,
     )
 
     # Run immediately on start
     capture_and_process(
-        args.resolution_tier, args.save_images, logs_dir, screenshots_dir, args.model
+        args.resolution_tier,
+        args.save_images,
+        logs_dir,
+        screenshots_dir,
+        args.model,
+        vector_store=vector_store,
+        embedding_model=args.embedding_model,
     )
 
     # Main loop
