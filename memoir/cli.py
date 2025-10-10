@@ -310,6 +310,126 @@ def search_memories(
         print()
 
 
+def run_capture_loop(
+    resolution_tier,
+    save_images,
+    logs_dir,
+    screenshots_dir,
+    model_name,
+    vector_store=None,
+    embedding_model="embeddinggemma",
+    interval=1,
+    run_once=False,
+    compare_tiers=False,
+):
+    """
+    Run the capture process loop.
+
+    Args:
+        resolution_tier: Resolution tier to use
+        save_images: Whether to save screenshot images
+        logs_dir: Path to logs directory
+        screenshots_dir: Path to screenshots directory
+        model_name: Ollama model name
+        vector_store: Optional VectorStore instance
+        embedding_model: Embedding model name
+        interval: Minutes between captures
+        run_once: Whether to run once and exit
+        compare_tiers: Whether to compare all resolution tiers
+    """
+    global running, live_reload_observer
+
+    # Set up signal handler for graceful shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+
+    print("=" * 60)
+    print("📷 Screenshot Memory System - Capture Mode")
+    print("=" * 60)
+    if not compare_tiers:
+        print(
+            f"Resolution tier: {resolution_tier} ({RESOLUTION_TIERS[resolution_tier][0]}x{RESOLUTION_TIERS[resolution_tier][1]})"
+        )
+    print(f"Save images: {'Yes' if save_images else 'No'}")
+    print(f"Vectorization: {'Yes ✓' if vector_store else 'No (disabled)'}")
+    print(f"Interval: {interval} minute(s)")
+    print(f"Model: {model_name}")
+    print(f"Logs directory: {logs_dir.absolute()}")
+    print("=" * 60)
+
+    # Warm up the models (unless disabled)
+    print()
+    warmup_model(model_name)
+
+    # Warm up embedding model if vectorization is enabled
+    if vector_store:
+        warmup_embedding_model(embedding_model)
+    print()
+
+    # Enable live reload if requested
+    if hasattr(run_capture_loop, "live_reload") and run_capture_loop.live_reload:
+        live_reload_observer = start_live_reload("memoir")
+        print()
+
+    if not run_once:
+        print("Press Ctrl+C to stop\n")
+
+    # Compare tiers mode
+    if compare_tiers:
+        compare_resolution_tiers(
+            save_images,
+            logs_dir,
+            screenshots_dir,
+            model_name,
+            vector_store=vector_store,
+            embedding_model=embedding_model,
+        )
+        return
+
+    # Run once mode for testing
+    if run_once:
+        capture_and_process(
+            resolution_tier,
+            save_images,
+            logs_dir,
+            screenshots_dir,
+            model_name,
+            vector_store=vector_store,
+            embedding_model=embedding_model,
+        )
+        print("\n✅ Single capture completed!")
+        return
+
+    # Schedule the job
+    schedule.every(interval).minutes.do(
+        capture_and_process,
+        resolution_tier=resolution_tier,
+        save_images=save_images,
+        logs_dir=logs_dir,
+        screenshots_dir=screenshots_dir,
+        model_name=model_name,
+        vector_store=vector_store,
+        embedding_model=embedding_model,
+    )
+
+    # Run immediately on start
+    capture_and_process(
+        resolution_tier,
+        save_images,
+        logs_dir,
+        screenshots_dir,
+        model_name,
+        vector_store=vector_store,
+        embedding_model=embedding_model,
+    )
+
+    # Main loop
+    while running:
+        schedule.run_pending()
+        time.sleep(1)
+
+    print("👋 Goodbye!")
+
+
 def run():
     """Main application entry point"""
     global running, live_reload_observer
@@ -319,8 +439,11 @@ def run():
         description="Screenshot Memory System - Capture and analyze screen activity with Ollama"
     )
 
-    # Add subcommands (optional - for search)
+    # Add subcommands
     subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # Capture command
+    capture_parser = subparsers.add_parser("capture", help="Run capture process only")
 
     # Search command
     search_parser = subparsers.add_parser(
@@ -343,6 +466,89 @@ def run():
         default="embeddinggemma",
         help="Embedding model name (default: embeddinggemma)",
     )
+
+    # Serve command
+    serve_parser = subparsers.add_parser("serve", help="Run API server only")
+    serve_parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind to (default: 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to bind to (default: 8000)",
+    )
+    serve_parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="embeddinggemma",
+        help="Embedding model name (default: embeddinggemma)",
+    )
+
+    # Both command
+    both_parser = subparsers.add_parser(
+        "both", help="Run both capture and server processes (default)"
+    )
+
+    # Add shared arguments to all subcommands
+    for subparser in [capture_parser, both_parser]:
+        subparser.add_argument(
+            "--resolution-tier",
+            choices=["efficient", "balanced", "detailed"],
+            default="detailed",
+            help="Resolution tier for screenshots (default: detailed - recommended, no performance penalty)",
+        )
+        subparser.add_argument(
+            "--save-images",
+            action="store_true",
+            help="Save screenshot images alongside logs",
+        )
+        subparser.add_argument(
+            "--interval",
+            type=int,
+            default=1,
+            help="Minutes between captures (default: 1)",
+        )
+        subparser.add_argument(
+            "--model",
+            type=str,
+            default="gemma3:4b",
+            help="Ollama model name (default: gemma3:4b)",
+        )
+        subparser.add_argument(
+            "--run-once",
+            action="store_true",
+            help="Run once and exit (useful for testing)",
+        )
+        subparser.add_argument(
+            "--compare-tiers",
+            action="store_true",
+            help="Compare all resolution tiers (only works with --run-once)",
+        )
+        subparser.add_argument(
+            "--no-warmup",
+            action="store_true",
+            help="Skip model warmup at startup (not recommended)",
+        )
+        subparser.add_argument(
+            "--disable-vectorization",
+            action="store_true",
+            help="Disable vectorization and vector database storage (vectorization is ON by default)",
+        )
+        subparser.add_argument(
+            "--embedding-model",
+            type=str,
+            default="embeddinggemma",
+            help="Embedding model name (default: embeddinggemma)",
+        )
+        subparser.add_argument(
+            "--live-reload",
+            action="store_true",
+            help="Enable live reload on code changes",
+        )
 
     # Capture arguments (at top level for backward compatibility)
     parser.add_argument(
@@ -398,9 +604,9 @@ def run():
     # Parse arguments
     args = parser.parse_args()
 
-    # Default to capture if no command specified
+    # Default to both if no command specified
     if args.command is None:
-        args.command = "capture"
+        args.command = "both"
 
     # Handle search command
     if args.command == "search":
@@ -413,120 +619,105 @@ def run():
 
         if vector_store.count() == 0:
             print("📭 No memories in vector store yet!")
-            print(
-                "   Run with --enable-vectorization to start building your memory database"
-            )
+            print("   Run with capture mode to start building your memory database")
             return
 
         # Perform search
         search_memories(args.query, vector_store, args.embedding_model, args.results)
         return
 
-    # Capture mode continues below
-    # Validate arguments
-    if args.compare_tiers and not args.run_once:
-        print("❌ Error: --compare-tiers requires --run-once flag")
-        sys.exit(1)
+    # Handle serve command
+    if args.command == "serve":
+        from .server import run_server
 
-    # Set up signal handler for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
+        # Create necessary directories
+        logs_dir, screenshots_dir = setup_directories()
 
-    # Create necessary directories
-    logs_dir, screenshots_dir = setup_directories()
-
-    # Initialize vector store (enabled by default unless explicitly disabled)
-    vector_store = None
-    enable_vectorization = not args.disable_vectorization
-    if enable_vectorization:
+        # Initialize vector store
         vector_store = VectorStore()
-        print(f"🗄️  Vector store enabled: {vector_store.count()} memories stored")
-    else:
-        print("⚠️  Vector database disabled - search will not be available")
 
-    print("=" * 60)
-    print("📷 Screenshot Memory System")
-    print("=" * 60)
-    if not args.compare_tiers:
-        print(
-            f"Resolution tier: {args.resolution_tier} ({RESOLUTION_TIERS[args.resolution_tier][0]}x{RESOLUTION_TIERS[args.resolution_tier][1]})"
+        # Run server
+        run_server(
+            host=args.host,
+            port=args.port,
+            logs_dir=logs_dir,
+            vector_store=vector_store,
+            embedding_model=args.embedding_model,
         )
-    print(f"Save images: {'Yes' if args.save_images else 'No'}")
-    print(f"Vectorization: {'Yes ✓' if enable_vectorization else 'No (disabled)'}")
-    print(f"Interval: {args.interval} minute(s)")
-    print(f"Model: {args.model}")
-    print(f"Logs directory: {logs_dir.absolute()}")
-    print("=" * 60)
+        return
 
-    # Warm up the models (unless disabled)
-    if not args.no_warmup:
-        print()
-        warmup_model(args.model)
+    # Handle capture command only
+    if args.command == "capture":
+        # Validate arguments
+        if args.compare_tiers and not args.run_once:
+            print("❌ Error: --compare-tiers requires --run-once flag")
+            sys.exit(1)
 
-        # Warm up embedding model if vectorization is enabled
+        # Create necessary directories
+        logs_dir, screenshots_dir = setup_directories()
+
+        # Initialize vector store (enabled by default unless explicitly disabled)
+        vector_store = None
+        enable_vectorization = not args.disable_vectorization
         if enable_vectorization:
-            warmup_embedding_model(args.embedding_model)
-        print()
+            vector_store = VectorStore()
+            print(f"🗄️  Vector store enabled: {vector_store.count()} memories stored")
+        else:
+            print("⚠️  Vector database disabled - search will not be available")
 
-    # Enable live reload if requested
-    if args.live_reload:
-        live_reload_observer = start_live_reload("memoir")
-        print()
+        # Set live reload flag for capture loop
+        run_capture_loop.live_reload = args.live_reload
 
-    if not args.run_once:
-        print("Press Ctrl+C to stop\n")
-
-    # Compare tiers mode
-    if args.compare_tiers:
-        compare_resolution_tiers(
-            args.save_images,
-            logs_dir,
-            screenshots_dir,
-            args.model,
+        # Run capture loop
+        run_capture_loop(
+            resolution_tier=args.resolution_tier,
+            save_images=args.save_images,
+            logs_dir=logs_dir,
+            screenshots_dir=screenshots_dir,
+            model_name=args.model,
             vector_store=vector_store,
             embedding_model=args.embedding_model,
+            interval=args.interval,
+            run_once=args.run_once,
+            compare_tiers=args.compare_tiers,
         )
-        return
 
-    # Run once mode for testing
-    if args.run_once:
-        capture_and_process(
-            args.resolution_tier,
-            args.save_images,
-            logs_dir,
-            screenshots_dir,
-            args.model,
+    # Handle both command
+    elif args.command == "both":
+        # Validate arguments
+        if args.compare_tiers and not args.run_once:
+            print("❌ Error: --compare-tiers requires --run-once flag")
+            sys.exit(1)
+
+        # Create necessary directories
+        logs_dir, screenshots_dir = setup_directories()
+
+        # Initialize vector store (enabled by default unless explicitly disabled)
+        vector_store = None
+        enable_vectorization = not args.disable_vectorization
+        if enable_vectorization:
+            vector_store = VectorStore()
+            print(f"🗄️  Vector store enabled: {vector_store.count()} memories stored")
+        else:
+            print("⚠️  Vector database disabled - search will not be available")
+
+        # Set live reload flag for capture loop
+        run_capture_loop.live_reload = args.live_reload
+
+        # Run both processes concurrently
+        from .runner import run_both
+
+        run_both(
+            resolution_tier=args.resolution_tier,
+            save_images=args.save_images,
+            logs_dir=logs_dir,
+            screenshots_dir=screenshots_dir,
+            model_name=args.model,
             vector_store=vector_store,
             embedding_model=args.embedding_model,
+            interval=args.interval,
+            run_once=args.run_once,
+            compare_tiers=args.compare_tiers,
+            server_host="0.0.0.0",
+            server_port=8000,
         )
-        print("\n✅ Single capture completed!")
-        return
-
-    # Schedule the job
-    schedule.every(args.interval).minutes.do(
-        capture_and_process,
-        resolution_tier=args.resolution_tier,
-        save_images=args.save_images,
-        logs_dir=logs_dir,
-        screenshots_dir=screenshots_dir,
-        model_name=args.model,
-        vector_store=vector_store,
-        embedding_model=args.embedding_model,
-    )
-
-    # Run immediately on start
-    capture_and_process(
-        args.resolution_tier,
-        args.save_images,
-        logs_dir,
-        screenshots_dir,
-        args.model,
-        vector_store=vector_store,
-        embedding_model=args.embedding_model,
-    )
-
-    # Main loop
-    while running:
-        schedule.run_pending()
-        time.sleep(1)
-
-    print("👋 Goodbye!")
