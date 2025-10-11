@@ -305,3 +305,41 @@ def get_snapshot_by_id(
     except Exception as e:
         print(f"Error loading snapshot {memory_id}: {e}")
         return None
+
+
+def get_oldest_snapshot_timestamp(logs_dir: Path) -> Optional[str]:
+    """
+    Find the oldest snapshot timestamp in the logs directory.
+
+    Args:
+        logs_dir: Path to logs directory
+
+    Returns:
+        ISO format timestamp string of the oldest snapshot, or None if no snapshots exist
+    """
+    json_files = list(logs_dir.glob("*.json"))
+
+    if not json_files:
+        return None
+
+    oldest_timestamp = None
+    oldest_datetime = None
+
+    for json_file in json_files:
+        try:
+            with open(json_file, "r") as f:
+                data = json.load(f)
+
+            timestamp_str = data.get("timestamp")
+            if timestamp_str:
+                timestamp_dt = date_parser.parse(timestamp_str)
+
+                if oldest_datetime is None or timestamp_dt < oldest_datetime:
+                    oldest_datetime = timestamp_dt
+                    oldest_timestamp = timestamp_str
+
+        except Exception as e:
+            print(f"Warning: Could not load {json_file}: {e}")
+            continue
+
+    return oldest_timestamp

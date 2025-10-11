@@ -42,6 +42,7 @@ def capture_and_process(
     model_name,
     vector_store=None,
     embedding_model="embeddinggemma",
+    power_efficient=False,
 ):
     """
     Main function to capture, process, and log a screenshot.
@@ -54,6 +55,7 @@ def capture_and_process(
         model_name: Ollama model name
         vector_store: Optional VectorStore instance for semantic search
         embedding_model: Embedding model name
+        power_efficient: If True, use power-efficient settings
 
     Returns:
         Dictionary with timing stats or None if failed
@@ -85,7 +87,7 @@ def capture_and_process(
 
     # Process with Ollama
     print(f"🤖 Processing with Ollama ({model_name})...")
-    summary, ollama_stats = process_with_ollama(screenshot, model_name)
+    summary, ollama_stats = process_with_ollama(screenshot, model_name, power_efficient)
 
     if summary is None:
         print("⚠️  Processing failed, skipping log entry")
@@ -133,6 +135,7 @@ def compare_resolution_tiers(
     model_name,
     vector_store=None,
     embedding_model="embeddinggemma",
+    power_efficient=False,
 ):
     """
     Compare all three resolution tiers and display results.
@@ -145,6 +148,7 @@ def compare_resolution_tiers(
         model_name: Ollama model name
         vector_store: Optional VectorStore instance
         embedding_model: Embedding model name
+        power_efficient: If True, use power-efficient settings
     """
     print("\n" + "=" * 80)
     print("🔬 RESOLUTION TIER COMPARISON MODE")
@@ -168,6 +172,7 @@ def compare_resolution_tiers(
             model_name,
             vector_store=vector_store,
             embedding_model=embedding_model,
+            power_efficient=power_efficient,
         )
         if stats:
             results[tier] = stats
@@ -321,6 +326,7 @@ def run_capture_loop(
     interval=1,
     run_once=False,
     compare_tiers=False,
+    power_efficient=False,
 ):
     """
     Run the capture process loop.
@@ -336,11 +342,11 @@ def run_capture_loop(
         interval: Minutes between captures
         run_once: Whether to run once and exit
         compare_tiers: Whether to compare all resolution tiers
+        power_efficient: If True, use power-efficient settings
     """
     global running, live_reload_observer
 
-    # Set up signal handler for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
+    # Note: Signal handler should be set up in the main thread, not here
 
     print("=" * 60)
     print("📷 Screenshot Memory System - Capture Mode")
@@ -354,11 +360,15 @@ def run_capture_loop(
     print(f"Interval: {interval} minute(s)")
     print(f"Model: {model_name}")
     print(f"Logs directory: {logs_dir.absolute()}")
+    if power_efficient:
+        print(
+            "🔋 Power-efficient mode: ENABLED (reduced CPU usage, shorter model keep-alive)"
+        )
     print("=" * 60)
 
     # Warm up the models (unless disabled)
     print()
-    warmup_model(model_name)
+    warmup_model(model_name, power_efficient)
 
     # Warm up embedding model if vectorization is enabled
     if vector_store:
@@ -382,6 +392,7 @@ def run_capture_loop(
             model_name,
             vector_store=vector_store,
             embedding_model=embedding_model,
+            power_efficient=power_efficient,
         )
         return
 
@@ -395,6 +406,7 @@ def run_capture_loop(
             model_name,
             vector_store=vector_store,
             embedding_model=embedding_model,
+            power_efficient=power_efficient,
         )
         print("\n✅ Single capture completed!")
         return
@@ -409,6 +421,7 @@ def run_capture_loop(
         model_name=model_name,
         vector_store=vector_store,
         embedding_model=embedding_model,
+        power_efficient=power_efficient,
     )
 
     # Run immediately on start
@@ -420,12 +433,15 @@ def run_capture_loop(
         model_name,
         vector_store=vector_store,
         embedding_model=embedding_model,
+        power_efficient=power_efficient,
     )
 
-    # Main loop
+    # Main loop with power-efficient sleep intervals
     while running:
         schedule.run_pending()
-        time.sleep(1)
+        # Use longer sleep to reduce CPU wake-ups and power consumption
+        # Check every 10 seconds instead of every second
+        time.sleep(10)
 
     print("👋 Goodbye!")
 
@@ -549,6 +565,11 @@ def run():
             action="store_true",
             help="Enable live reload on code changes",
         )
+        subparser.add_argument(
+            "--power-efficient",
+            action="store_true",
+            help="Enable power-efficient mode (longer sleep intervals, shorter model keep-alive)",
+        )
 
     # Capture arguments (at top level for backward compatibility)
     parser.add_argument(
@@ -599,6 +620,11 @@ def run():
         "--live-reload",
         action="store_true",
         help="Enable live reload on code changes",
+    )
+    parser.add_argument(
+        "--power-efficient",
+        action="store_true",
+        help="Enable power-efficient mode (longer sleep intervals, shorter model keep-alive)",
     )
 
     # Parse arguments
@@ -653,6 +679,9 @@ def run():
             print("❌ Error: --compare-tiers requires --run-once flag")
             sys.exit(1)
 
+        # Set up signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, signal_handler)
+
         # Create necessary directories
         logs_dir, screenshots_dir = setup_directories()
 
@@ -680,6 +709,7 @@ def run():
             interval=args.interval,
             run_once=args.run_once,
             compare_tiers=args.compare_tiers,
+            power_efficient=args.power_efficient,
         )
 
     # Handle both command
@@ -720,4 +750,5 @@ def run():
             compare_tiers=args.compare_tiers,
             server_host="0.0.0.0",
             server_port=8000,
+            power_efficient=args.power_efficient,
         )

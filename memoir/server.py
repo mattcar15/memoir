@@ -14,6 +14,7 @@ from .retrieval import (
     filter_top_k_by_tokens,
     search_snapshots,
     load_snapshot_data,
+    get_oldest_snapshot_timestamp,
 )
 from .vector_store import VectorStore
 from .embeddings import create_embedding
@@ -42,7 +43,11 @@ def create_app(
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
+        allow_origins=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "*",  # Allow all origins for development
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -55,6 +60,7 @@ def create_app(
             "message": "Memoir API",
             "version": "1.0.0",
             "endpoints": {
+                "me": "/me",
                 "range": "/snapshots/range",
                 "search": "/snapshots/search",
                 "images": "/images/{filename}",
@@ -218,6 +224,24 @@ def create_app(
             "vector_store_count": vector_store.count(),
             "logs_dir": str(logs_dir),
         }
+
+    @app.get("/me")
+    async def get_user_info():
+        """
+        Get user information including the oldest snapshot timestamp.
+        """
+        try:
+            oldest_timestamp = get_oldest_snapshot_timestamp(logs_dir)
+            total_snapshots = len(list(logs_dir.glob("*.json")))
+
+            return {
+                "total_snapshots": total_snapshots,
+                "oldest_snapshot": oldest_timestamp,
+            }
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Internal server error: {str(e)}"
+            )
 
     return app
 

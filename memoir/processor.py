@@ -25,13 +25,14 @@ def image_to_base64(image):
     return base64.b64encode(img_bytes).decode("utf-8")
 
 
-def process_with_ollama(image, model_name="gemma3:4b"):
+def process_with_ollama(image, model_name="gemma3:4b", power_efficient=False):
     """
     Process the screenshot with Ollama via LangChain.
 
     Args:
         image: PIL Image object
         model_name: Name of the Ollama model to use
+        power_efficient: If True, use shorter keep_alive for better power management
 
     Returns:
         Tuple of (Model's response text, stats dict) or (None, None) if processing fails
@@ -39,11 +40,12 @@ def process_with_ollama(image, model_name="gemma3:4b"):
     try:
         start_time = time.time()
 
-        # Initialize Ollama chat model with keep_alive to keep model loaded
+        # Initialize Ollama chat model with power-efficient keep_alive settings
+        keep_alive_time = "2m" if power_efficient else "5m"
         llm = ChatOllama(
             model=model_name,
             temperature=0.1,
-            keep_alive="1h",  # Keep model loaded for 1 hour
+            keep_alive=keep_alive_time,  # Shorter keep_alive for power efficiency
         )
 
         # Convert image to base64
@@ -96,13 +98,14 @@ def process_with_ollama(image, model_name="gemma3:4b"):
         return None, None
 
 
-def warmup_model(model_name="gemma3:4b"):
+def warmup_model(model_name="gemma3:4b", power_efficient=False):
     """
     Warm up the Ollama model by running a tiny test inference.
     This loads the model into memory to avoid cold start delays.
 
     Args:
         model_name: Name of the Ollama model to warm up
+        power_efficient: If True, use shorter keep_alive for better power management
 
     Returns:
         True if warmup successful, False otherwise
@@ -111,11 +114,12 @@ def warmup_model(model_name="gemma3:4b"):
         print(f"🔥 Warming up Ollama model ({model_name})...")
         start_time = time.time()
 
-        # Initialize Ollama with keep_alive
+        # Initialize Ollama with power-efficient keep_alive settings
+        keep_alive_time = "2m" if power_efficient else "5m"
         llm = ChatOllama(
             model=model_name,
             temperature=0.3,
-            keep_alive="1h",
+            keep_alive=keep_alive_time,  # Shorter keep_alive for power efficiency
         )
 
         # Send a minimal prompt to load the model

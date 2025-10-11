@@ -36,6 +36,7 @@ def run_capture_process(
     interval: int = 1,
     run_once: bool = False,
     compare_tiers: bool = False,
+    power_efficient: bool = False,
 ):
     """
     Run the capture process in a separate thread.
@@ -51,6 +52,7 @@ def run_capture_process(
         interval: Minutes between captures
         run_once: Whether to run once and exit
         compare_tiers: Whether to compare all resolution tiers
+        power_efficient: If True, use power-efficient settings
     """
     try:
         run_capture_loop(
@@ -64,6 +66,7 @@ def run_capture_process(
             interval=interval,
             run_once=run_once,
             compare_tiers=compare_tiers,
+            power_efficient=power_efficient,
         )
     except KeyboardInterrupt:
         print("📷 Capture process stopped")
@@ -115,6 +118,7 @@ def run_both(
     compare_tiers: bool = False,
     server_host: str = "0.0.0.0",
     server_port: int = 8000,
+    power_efficient: bool = False,
 ):
     """
     Run both capture and server processes concurrently.
@@ -135,8 +139,12 @@ def run_both(
     """
     global running
 
-    # Set up signal handler for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
+    # Set up signal handler for graceful shutdown (only in main thread)
+    try:
+        signal.signal(signal.SIGINT, signal_handler)
+    except ValueError:
+        # Signal handler already set up, or not in main thread
+        pass
 
     print("=" * 80)
     print("🚀 Memoir - Capture + API Server")
@@ -162,6 +170,7 @@ def run_both(
             interval,
             run_once,
             compare_tiers,
+            power_efficient,
         ),
         daemon=True,
     )
@@ -176,9 +185,10 @@ def run_both(
     server_thread.start()
 
     try:
-        # Wait for both threads to complete
+        # Wait for both threads to complete with power-efficient polling
         while running and (capture_thread.is_alive() or server_thread.is_alive()):
-            time.sleep(1)
+            # Use longer sleep to reduce CPU wake-ups and power consumption
+            time.sleep(5)
 
             # Check if capture process finished (for run_once mode)
             if run_once and not capture_thread.is_alive():
