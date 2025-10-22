@@ -4,6 +4,7 @@ Visualization functions for OCR results, text groups, and menu regions.
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+import cv2
 from utils import box_bounds
 
 
@@ -102,20 +103,13 @@ def draw_grouped_regions(
     return pil
 
 
-def draw_menu_regions(image_rgb, menu_results, img_size):
+def draw_menu_regions(image_rgb, menu_results):
     """
     Draw menu detection strips with color-coded status.
     Red = detected menu, Yellow = uncertain, Gray = not a menu
     """
     pil = Image.fromarray(image_rgb.copy())
     draw = ImageDraw.Draw(pil, "RGBA")
-
-    W, H = img_size
-    strips = {
-        "top": (0, 0, W, int(0.16 * H)),
-        "left": (0, 0, int(0.18 * W), H),
-        "right": (int(0.82 * W), 0, W, H),
-    }
 
     status_colors = {
         "menu": (255, 0, 0, 60),  # Red
@@ -129,25 +123,38 @@ def draw_menu_regions(image_rgb, menu_results, img_size):
     except Exception:
         pass
 
-    for name, status, score in menu_results:
-        rect = strips[name]
+    for region in menu_results:
+        name = region["name"]
+        status = region.get("status")
+        score = region.get("score", 0.0)
+        rect = region.get("rect")
+
+        if not rect:
+            continue
+
+        x0, y0, x1, y1 = [int(round(v)) for v in rect]
         color = status_colors.get(status, (128, 128, 128, 30))
 
         # Draw rectangle
         draw.rectangle(
-            rect, fill=color, outline=(color[0], color[1], color[2], 200), width=3
+            [(x0, y0), (x1, y1)],
+            fill=color,
+            outline=(color[0], color[1], color[2], 200),
+            width=3,
         )
 
         # Draw label
         label = f"{name.upper()}: {status or 'none'} ({score:.2f})"
+        if region.get("notes"):
+            label += f" [{region['notes']}]"
 
         # Position label inside the strip
         if name == "top":
             text_pos = (10, 10)
         elif name == "left":
-            text_pos = (10, H // 2)
+            text_pos = (x0 + 10, y0 + (y1 - y0) // 2)
         else:  # right
-            text_pos = (int(0.83 * W), H // 2)
+            text_pos = (max(0, x1 - 10 - len(label) * 10), y0 + (y1 - y0) // 2)
 
         text_width = (
             draw.textlength(label, font=font)
@@ -168,11 +175,19 @@ def draw_menu_regions(image_rgb, menu_results, img_size):
             font=font,
         )
 
+        divider = region.get("divider")
+        if divider and status:
+            draw.line(
+                [(divider[0], divider[1]), (divider[2], divider[3])],
+                fill=(0, 255, 255, 220),
+                width=3,
+            )
+
     return pil
 
 
 def create_combined_output(
-    image_rgb, boxes, texts, scores, groups, dropped_indices, menu_results, img_size
+    image_rgb, boxes, texts, scores, groups, dropped_indices, menu_results
 ):
     """
     Create a composite visualization with OCR boxes, paragraph groups, and menu regions.
@@ -184,6 +199,148 @@ def create_combined_output(
 
     # Overlay menu regions
     result_array = np.array(result)
-    result = draw_menu_regions(result_array, menu_results, img_size)
+    result = draw_menu_regions(result_array, menu_results)
 
     return result
+
+
+def draw_menu_stage(image_rgb, menu_results, stage="initial"):
+    """
+    Draw menu regions for a specific processing stage ("initial" or "final").
+    """
+    pil = Image.fromarray(image_rgb.copy())
+    draw = ImageDraw.Draw(pil, "RGBA")
+
+    colors = {
+        "menu": (255, 0, 0, 60),
+        "maybe": (255, 255, 0, 60),
+        None: (128, 128, 128, 30),
+    }
+
+    font = None
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
+    except Exception:
+        pass
+
+    for region in menu_results:
+        if stage == "initial":
+            rect = region.get("initial_rect")
+            status = region.get("initial_status")
+            score = region.get("initial_score", 0.0)
+        else:
+            rect = region.get("rect")
+            status = region.get("status")
+            score = region.get("score", 0.0)
+
+        if not rect:
+            continue
+
+        x0, y0, x1, y1 = [int(round(v)) for v in rect]
+        color = colors.get(status, (128, 128, 128, 30))
+
+        draw.rectangle(
+            [(x0, y0), (x1, y1)],
+            fill=color,
+            outline=(color[0], color[1], color[2], 200),
+            width=3,
+        )
+
+        label = (
+            f"{region['name'].upper()} {stage}: {status or 'none'} ({score:.2f})"
+        )
+        text_width = (
+            draw.textlength(label, font=font)
+            if hasattr(draw, "textlength") and font
+            else 10 * len(label)
+        )
+        text_height = font.size if font else 20
+        draw.rectangle(
+            [(x0 + 10, y0 + 10), (x0 + 10 + text_width + 8, y0 + 10 + text_height + 4)],
+            fill=(0, 0, 0, 200),
+        )
+        draw.text(
+            (x0 + 14, y0 + 12),
+            label,
+            fill=(255, 255, 255, 255),
+            font=font,
+        )
+
+        if stage == "final":
+            divider = region.get("divider")
+            if divider and status:
+                draw.line(
+                    [(divider[0], divider[1]), (divider[2], divider[3])],
+                    fill=(0, 255, 255, 220),
+                    width=3,
+                )
+
+    return pil
+
+
+def draw_divider_edges(image_rgb, boxes, menu_results):
+    """
+    Show the blurred grayscale image used for divider edge detection, with Sobel edges highlighted.
+    """
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    gray_blurred = gray.copy()
+    height, width = gray.shape
+
+    for box in boxes:
+        if not box:
+            continue
+        bx0, by0, bx1, by1 = box_bounds(box)
+        x0 = max(0, int(round(bx0)))
+        y0 = max(0, int(round(by0)))
+        x1 = min(width, int(round(bx1)))
+        y1 = min(height, int(round(by1)))
+        if x1 - x0 <= 1 or y1 - y0 <= 1:
+            continue
+        region = gray_blurred[y0:y1, x0:x1]
+        if region.size == 0:
+            continue
+        kernel_w = 5 if (x1 - x0) >= 5 else 3
+        kernel_h = 5 if (y1 - y0) >= 5 else 3
+        if kernel_w < 3 or kernel_h < 3:
+            continue
+        blurred = cv2.GaussianBlur(region, (kernel_w, kernel_h), 0)
+        gray_blurred[y0:y1, x0:x1] = blurred
+
+    overlay = cv2.cvtColor(gray_blurred, cv2.COLOR_GRAY2RGB)
+
+    for region in menu_results:
+        rect = region.get("rect")
+        status = region.get("status")
+        if not rect:
+            continue
+        x0, y0, x1, y1 = [int(round(v)) for v in rect]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(image_rgb.shape[1], x1), min(image_rgb.shape[0], y1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        edges = region.get("divider_edges")
+        if edges is not None:
+            edges = np.asarray(edges)
+            region_h, region_w = edges.shape[:2]
+            target_h = y1 - y0
+            target_w = x1 - x0
+            if region_h != target_h or region_w != target_w:
+                edges = cv2.resize(edges, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+            mask = edges > 0
+            if np.any(mask):
+                overlay_region = overlay[y0:y1, x0:x1]
+                overlay_region[mask] = [0, 200, 255]
+                overlay[y0:y1, x0:x1] = overlay_region
+
+        divider = region.get("divider")
+        if divider and status:
+            cv2.line(
+                overlay,
+                (int(divider[0]), int(divider[1])),
+                (int(divider[2]), int(divider[3])),
+                (255, 0, 0),
+                2,
+            )
+
+    return Image.fromarray(overlay)
