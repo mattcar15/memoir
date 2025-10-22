@@ -7,6 +7,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import schedule
 
@@ -446,6 +447,162 @@ def run_capture_loop(
     print("👋 Goodbye!")
 
 
+def run_benchmark(
+    screenshots_dir,
+    max_images,
+    skip_llm,
+    output_dir,
+    similarity_threshold,
+    embedding_model,
+    ollama_model,
+    save_images,
+    verbose,
+):
+    """
+    Run benchmark on existing screenshots.
+
+    Args:
+        screenshots_dir: Directory containing screenshots
+        max_images: Maximum number of images to process
+        skip_llm: Whether to skip LLM processing
+        output_dir: Directory to save processed images
+        similarity_threshold: Cosine similarity threshold
+        embedding_model: Embedding model name
+        ollama_model: Ollama model name
+        save_images: Whether to save processed images
+    """
+    from .pipeline.main import ImagePipeline
+    from PIL import Image
+
+    print("=" * 80)
+    print("🔬 BENCHMARK MODE")
+    print("=" * 80)
+    print(f"Screenshots directory: {screenshots_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Max images: {max_images if max_images else 'all'}")
+    print(f"LLM processing: {'Disabled' if skip_llm else 'Enabled'}")
+    print(f"Similarity threshold: {similarity_threshold}")
+    print(f"Save images: {save_images}")
+    print(f"Verbose mode: {'Enabled' if verbose else 'Disabled'}")
+    print("=" * 80)
+    print()
+
+    # Find all screenshot images
+    screenshots_path = Path(screenshots_dir)
+    if not screenshots_path.exists():
+        print(f"❌ Error: Screenshots directory not found: {screenshots_dir}")
+        return
+
+    image_files = sorted(
+        list(screenshots_path.glob("*.png"))
+        + list(screenshots_path.glob("*.jpg"))
+        + list(screenshots_path.glob("*.jpeg"))
+    )
+
+    if not image_files:
+        print(f"❌ Error: No images found in {screenshots_dir}")
+        return
+
+    print(f"📁 Found {len(image_files)} images")
+
+    # Limit number of images if requested
+    if max_images and max_images > 0:
+        image_files = image_files[:max_images]
+        print(f"🔢 Processing first {len(image_files)} images")
+
+    print()
+
+    # Initialize pipeline
+    pipeline = ImagePipeline(
+        similarity_threshold=similarity_threshold,
+        memory_window_minutes=5,
+        phash_threshold=10,
+        ocr_text_threshold=100,
+        enable_llm=not skip_llm,
+        embedding_model=embedding_model,
+        ollama_model=ollama_model,
+        verbose=verbose,
+    )
+
+    # Process images
+    output_path = Path(output_dir) if save_images else None
+
+    start_time = time.time()
+    results = []
+
+    for i, image_file in enumerate(image_files):
+        print(f"\n{'='*80}")
+        print(f"Processing {i+1}/{len(image_files)}: {image_file.name}")
+        print(f"{'='*80}")
+
+        try:
+            # Load image
+            image = Image.open(image_file)
+
+            # Process through pipeline
+            result = pipeline.process_image(
+                image,
+                output_dir=output_path,
+                save_images=save_images,
+            )
+
+            if result:
+                results.append(result)
+
+        except Exception as e:
+            print(f"❌ Error processing {image_file.name}: {e}")
+            import traceback
+
+            traceback.print_exc()
+            continue
+
+    total_time = time.time() - start_time
+
+    # Print statistics
+    print("\n" + "=" * 80)
+    print("🏁 BENCHMARK COMPLETE")
+    print("=" * 80)
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Average time per image: {total_time/len(image_files):.2f}s")
+    print()
+
+    pipeline.print_statistics()
+
+    # Print detailed breakdown
+    if results:
+        print("\n" + "=" * 80)
+        print("📋 DETAILED RESULTS")
+        print("=" * 80)
+
+        for i, result in enumerate(results):
+            print(f"\nImage {i+1}:")
+            print(f"  Memory ID: {result['memory_id']}")
+            print(f"  New Memory: {result['is_new_memory']}")
+            print(f"  Processing: {result['processing_method']}")
+            print(
+                f"  Summary: {result['summary'][:80]}{'...' if len(result['summary']) > 80 else ''}"
+            )
+            if result.get("extracted_text"):
+                text_preview = result["extracted_text"][:60]
+                print(
+                    f"  Extracted Text: {text_preview}{'...' if len(result['extracted_text']) > 60 else ''}"
+                )
+
+        print("\n" + "=" * 80)
+        print("💾 MEMORY DETAILS")
+        print("=" * 80)
+
+        for memory in pipeline.memories:
+            mem_dict = memory.to_dict()
+            print(f"\nMemory: {mem_dict['memory_id']}")
+            print(f"  Created: {mem_dict['created_at']}")
+            print(f"  Last Updated: {mem_dict['last_updated']}")
+            print(f"  Images: {mem_dict['image_count']}")
+            print(f"  Summaries: {len(mem_dict['summaries'])}")
+            for j, summary in enumerate(mem_dict["summaries"]):
+                print(f"    {j+1}. {summary[:70]}{'...' if len(summary) > 70 else ''}")
+
+
 def run():
     """Main application entry point"""
     global running, live_reload_observer
@@ -481,6 +638,62 @@ def run():
         type=str,
         default="embeddinggemma",
         help="Embedding model name (default: embeddinggemma)",
+    )
+
+    # Benchmark command
+    benchmark_parser = subparsers.add_parser(
+        "benchmark", help="Run benchmark on existing screenshots"
+    )
+    benchmark_parser.add_argument(
+        "--screenshots-dir",
+        type=str,
+        default="logs/screenshots",
+        help="Directory containing screenshots to process (default: logs/screenshots)",
+    )
+    benchmark_parser.add_argument(
+        "--max-images",
+        type=int,
+        default=None,
+        help="Maximum number of images to process (default: all)",
+    )
+    benchmark_parser.add_argument(
+        "--skip-llm",
+        action="store_true",
+        help="Skip LLM processing (faster, OCR only)",
+    )
+    benchmark_parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="logs/benchmark_output",
+        help="Directory to save processed images (default: logs/benchmark_output)",
+    )
+    benchmark_parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=0.7,
+        help="Cosine similarity threshold for memory consolidation (default: 0.7)",
+    )
+    benchmark_parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="embeddinggemma",
+        help="Embedding model name (default: embeddinggemma)",
+    )
+    benchmark_parser.add_argument(
+        "--model",
+        type=str,
+        default="gemma3:4b",
+        help="Ollama model name for LLM processing (default: gemma3:4b)",
+    )
+    benchmark_parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Don't save processed images to disk",
+    )
+    benchmark_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show full summaries and additional details",
     )
 
     # Serve command
@@ -650,6 +863,21 @@ def run():
 
         # Perform search
         search_memories(args.query, vector_store, args.embedding_model, args.results)
+        return
+
+    # Handle benchmark command
+    if args.command == "benchmark":
+        run_benchmark(
+            screenshots_dir=args.screenshots_dir,
+            max_images=args.max_images,
+            skip_llm=args.skip_llm,
+            output_dir=args.output_dir,
+            similarity_threshold=args.similarity_threshold,
+            embedding_model=args.embedding_model,
+            ollama_model=args.model,
+            save_images=not args.no_save,
+            verbose=args.verbose,
+        )
         return
 
     # Handle serve command
