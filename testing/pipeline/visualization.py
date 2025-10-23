@@ -280,7 +280,7 @@ def draw_menu_stage(image_rgb, menu_results, stage="initial"):
 
 def draw_divider_edges(image_rgb, boxes, menu_results):
     """
-    Show the blurred grayscale image used for divider edge detection, with Sobel edges highlighted.
+    Show the blurred grayscale image used for Hough-based divider detection, highlighting edge responses and line candidates.
     """
     gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
     gray_blurred = gray.copy()
@@ -306,7 +306,7 @@ def draw_divider_edges(image_rgb, boxes, menu_results):
         blurred = cv2.GaussianBlur(region, (kernel_w, kernel_h), 0)
         gray_blurred[y0:y1, x0:x1] = blurred
 
-    overlay = cv2.cvtColor(gray_blurred, cv2.COLOR_GRAY2RGB)
+    overlay_bgr = cv2.cvtColor(gray_blurred, cv2.COLOR_GRAY2BGR)
 
     for region in menu_results:
         rect = region.get("rect")
@@ -321,26 +321,44 @@ def draw_divider_edges(image_rgb, boxes, menu_results):
 
         edges = region.get("divider_edges")
         if edges is not None:
-            edges = np.asarray(edges)
-            region_h, region_w = edges.shape[:2]
+            edges_arr = np.asarray(edges)
+            region_h, region_w = edges_arr.shape[:2]
             target_h = y1 - y0
             target_w = x1 - x0
             if region_h != target_h or region_w != target_w:
-                edges = cv2.resize(edges, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-            mask = edges > 0
+                edges_arr = cv2.resize(
+                    edges_arr, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+                )
+            mask = edges_arr > 0
             if np.any(mask):
-                overlay_region = overlay[y0:y1, x0:x1]
-                overlay_region[mask] = [0, 200, 255]
-                overlay[y0:y1, x0:x1] = overlay_region
+                overlay_region = overlay_bgr[y0:y1, x0:x1]
+                overlay_region[mask] = [0, 255, 255]  # Yellow in BGR
+                overlay_bgr[y0:y1, x0:x1] = overlay_region
+
+        candidates = region.get("divider_candidates") or []
+        for cand in candidates:
+            xA, yA, xB, yB = cand
+            xA = int(round(xA))
+            yA = int(round(yA))
+            xB = int(round(xB))
+            yB = int(round(yB))
+            cv2.line(
+                overlay_bgr,
+                (xA, yA),
+                (xB, yB),
+                (255, 200, 0),
+                1,
+            )
 
         divider = region.get("divider")
         if divider and status:
             cv2.line(
-                overlay,
+                overlay_bgr,
                 (int(divider[0]), int(divider[1])),
                 (int(divider[2]), int(divider[3])),
-                (255, 0, 0),
+                (255, 0, 0),  # Blue in BGR
                 2,
             )
 
-    return Image.fromarray(overlay)
+    overlay_rgb = cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(overlay_rgb)

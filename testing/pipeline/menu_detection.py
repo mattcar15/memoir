@@ -29,13 +29,16 @@ SUBSTANTIAL_MIN_CHARS = 4
 SUBSTANTIAL_MIN_WORDS = 2
 PADDING_RATIO = 0.015
 TOP_MAX_HEIGHT_RATIO = 0.2
-DIVIDER_HORIZONTAL_COVERAGE = 0.65
-DIVIDER_VERTICAL_COVERAGE = 0.6
-DIVIDER_EDGE_TOL = 0.1  # acceptable fractional deviation from strip edge
 CONFIDENCE_GAP_THRESHOLD = 1.5
 DIVIDER_BONUS = 0.7
 SIDE_MIN_HEIGHT_RATIO = 0.75
-SOBEL_EDGE_THRESHOLD = 40
+HOUGH_CLAHE_CLIP = 2.0
+HOUGH_TILE = (8, 8)
+HOUGH_CANNY_LO = 50
+HOUGH_CANNY_HI = 120
+HOUGH_THRESHOLD = 60
+HOUGH_GAP = 10
+HOUGH_LINE_OFFSET_TOL = 2
 
 
 def _clamp_rect(rect: Tuple[int, int, int, int], width: int, height: int) -> Tuple[int, int, int, int]:
@@ -225,6 +228,74 @@ def spill_penalty(boxes, box_indices, rect):
     return min(1.0, total_spill / rect_area)
 
 
+def _detect_divider_hough(
+    name: str,
+    rect: Tuple[int, int, int, int],
+    gray_image: np.ndarray,
+) -> Tuple[
+    Optional[Tuple[int, int, int, int]],
+    List[Tuple[int, int, int, int]],
+    Dict[str, object],
+    Optional[np.ndarray],
+]:
+    x0, y0, x1, y1 = rect
+    roi = gray_image[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None, [], {"reason": "empty_roi"}, None
+
+    clahe = cv2.createCLAHE(
+        clipLimit=HOUGH_CLAHE_CLIP,
+        tileGridSize=HOUGH_TILE,
+    )
+    equalized = clahe.apply(roi)
+    edges = cv2.Canny(equalized, HOUGH_CANNY_LO, HOUGH_CANNY_HI)
+
+    debug = {
+        "edges_mean": float(edges.mean()),
+        "edges_nonzero": int(np.count_nonzero(edges)),
+    }
+
+    span = (x1 - x0) if name == "top" else (y1 - y0)
+    min_len = int(max(1, round(0.4 * span)))
+
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=HOUGH_THRESHOLD,
+        minLineLength=min_len,
+        maxLineGap=HOUGH_GAP,
+    )
+
+    candidates: List[Tuple[int, int, int, int]] = []
+    best = None
+    best_len = 0
+
+    if lines is not None:
+        debug["num_lines"] = int(len(lines))
+        for (xA, yA, xB, yB) in lines[:, 0]:
+            dx = xB - xA
+            dy = yB - yA
+            if name == "top":
+                if abs(dy) > HOUGH_LINE_OFFSET_TOL:
+                    continue
+                length = abs(dx)
+            else:
+                if abs(dx) > HOUGH_LINE_OFFSET_TOL:
+                    continue
+                length = abs(dy)
+
+            global_line = (xA + x0, yA + y0, xB + x0, yB + y0)
+            candidates.append(global_line)
+            if length > best_len:
+                best_len = length
+                best = global_line
+    else:
+        debug["num_lines"] = 0
+
+    return best, candidates, debug, edges
+
+
 def _score_region(
     name: str,
     rect: Tuple[int, int, int, int],
@@ -336,57 +407,17 @@ def _find_divider(
     name: str,
     rect: Tuple[int, int, int, int],
     gray_image: np.ndarray,
-) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[np.ndarray]]:
+) -> Tuple[
+    Optional[Tuple[int, int, int, int]],
+    List[Tuple[int, int, int, int]],
+    Dict[str, object],
+    Optional[np.ndarray],
+]:
     x0, y0, x1, y1 = rect
     if x1 - x0 < 3 or y1 - y0 < 3:
-        return None, None
+        return None, [], {"reason": "rect_too_small"}, None
 
-    region = gray_image[y0:y1, x0:x1]
-    if region.size == 0:
-        return None, None
-
-    if name == "top":
-        sobel = cv2.Sobel(region, cv2.CV_64F, 0, 1, ksize=3)
-    else:
-        sobel = cv2.Sobel(region, cv2.CV_64F, 1, 0, ksize=3)
-
-    edges = cv2.convertScaleAbs(sobel)
-    _, binary = cv2.threshold(edges, SOBEL_EDGE_THRESHOLD, 255, cv2.THRESH_BINARY)
-
-    if name == "top":
-        coverage = binary.sum(axis=1) / 255.0
-        if coverage.size == 0:
-            return None, binary
-        idx = int(np.argmax(coverage))
-        span = x1 - x0
-        if span <= 0:
-            return None, binary
-        fraction = coverage[idx] / span
-        if fraction >= DIVIDER_HORIZONTAL_COVERAGE and idx >= int(0.5 * coverage.size):
-            line_y = y0 + idx
-            return (x0, line_y, x1, line_y), binary
-        return None, binary
-
-    # Vertical divider for side menus
-    coverage = binary.sum(axis=0) / 255.0
-    if coverage.size == 0:
-        return None, binary
-    idx = int(np.argmax(coverage))
-    span = y1 - y0
-    if span <= 0:
-        return None, binary
-    fraction = coverage[idx] / span
-    if fraction < DIVIDER_VERTICAL_COVERAGE:
-        return None, binary
-
-    width = x1 - x0
-    expected_edge = width - 1 if name == "left" else 0
-    tolerance = max(2, int(round(width * DIVIDER_EDGE_TOL)))
-    if abs(idx - expected_edge) > tolerance:
-        return None, binary
-
-    line_x = x0 + idx
-    return (line_x, y0, line_x, y1), binary
+    return _detect_divider_hough(name, rect, gray_image)
 
 
 def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
@@ -397,7 +428,7 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
     """
     height, width = image_rgb.shape[:2]
     gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-    gray_for_edges = gray.copy()
+    gray_smoothed = gray.copy()
 
     for box in boxes:
         if not box:
@@ -407,7 +438,7 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
         x1, y1 = min(width, int(round(bx1))), min(height, int(round(by1)))
         if x1 - x0 <= 1 or y1 - y0 <= 1:
             continue
-        region = gray_for_edges[y0:y1, x0:x1]
+        region = gray_smoothed[y0:y1, x0:x1]
         if region.size == 0:
             continue
         kernel_w = 5 if (x1 - x0) >= 5 else 3
@@ -415,7 +446,7 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
         if kernel_w < 3 or kernel_h < 3:
             continue
         blurred = cv2.GaussianBlur(region, (kernel_w, kernel_h), 0)
-        gray_for_edges[y0:y1, x0:x1] = blurred
+        gray_smoothed[y0:y1, x0:x1] = blurred
 
     results: List[MenuResult] = []
 
@@ -436,6 +467,8 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
 
         note = None
         divider_line: Optional[Tuple[int, int, int, int]] = None
+        divider_candidates: List[Tuple[int, int, int, int]] = []
+        divider_debug: Dict[str, object] = {}
         divider_edges: Optional[np.ndarray] = None
         final_status = None
         final_score = 0.0
@@ -449,7 +482,14 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
                 note = "insufficient_height"
 
         if refined_rect[2] - refined_rect[0] > 0 and refined_rect[3] - refined_rect[1] > 0:
-            divider_line, divider_edges = _find_divider(name, refined_rect, gray_for_edges)
+            (
+                divider_line,
+                divider_candidates,
+                divider_debug,
+                divider_edges,
+            ) = _find_divider(
+                name, refined_rect, gray_smoothed
+            )
 
         if not substantial_indices or not side_height_ok:
             divider_line = None
@@ -475,6 +515,8 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
                 "score": final_score,
                 "indices": final_indices,
                 "divider": divider_line,
+                "divider_candidates": divider_candidates,
+                "divider_debug": divider_debug,
                 "divider_edges": divider_edges,
                 "notes": note,
             }
