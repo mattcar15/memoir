@@ -127,7 +127,7 @@ def draw_menu_regions(image_rgb, menu_results):
         name = region["name"]
         status = region.get("status")
         score = region.get("score", 0.0)
-        rect = region.get("rect")
+        rect = region.get("rect_aligned") or region.get("rect")
 
         if not rect:
             continue
@@ -197,9 +197,69 @@ def create_combined_output(
         image_rgb, boxes, groups, dropped_indices, font_path=None
     )
 
-    # Overlay menu regions
+    # Prepare adjusted menu regions only for the combined output visualization
+    height, width = image_rgb.shape[:2]
+
+    def _clamp(a, lo, hi):
+        return max(lo, min(hi, a))
+
+    adjusted: list[dict] = []
+    for region in menu_results or []:
+        r = dict(region)
+        name = r.get("name")
+        status = r.get("status")
+        base_rect = r.get("rect_aligned") or r.get("rect")
+
+        # Only adjust for confident/maybe menus and when a base rect exists
+        if status in ("menu", "maybe") and base_rect:
+            x0, y0, x1, y1 = [int(round(v)) for v in base_rect]
+
+            # Prefer divider line as the alignment target when present
+            divider = r.get("divider")
+            if name == "left":
+                target_x = None
+                if divider:
+                    target_x = int(round(min(divider[0], divider[2])))
+                else:
+                    # Fallback to current aligned inner edge
+                    target_x = x1
+                target_x = _clamp(target_x, 0, width)
+                # Grow/shrink so the inner (right) edge aligns; span full height
+                new_rect = (x0, 0, max(x0 + 1, target_x), height)
+            elif name == "right":
+                target_x = None
+                if divider:
+                    target_x = int(round(max(divider[0], divider[2])))
+                else:
+                    target_x = x0
+                target_x = _clamp(target_x, 0, width)
+                # Grow/shrink so the inner (left) edge aligns; span full height
+                new_rect = (min(target_x, x1 - 1), 0, x1, height)
+            elif name == "top":
+                target_y = None
+                if divider:
+                    target_y = int(round(max(divider[1], divider[3])))
+                else:
+                    target_y = y1
+                target_y = _clamp(target_y, 0, height)
+                # Grow/shrink so the bottom edge aligns; span full width
+                new_rect = (0, 0, width, max(1, target_y))
+            else:
+                new_rect = base_rect
+
+            # Ensure valid ordering
+            nx0, ny0, nx1, ny1 = new_rect
+            if nx1 <= nx0:
+                nx1 = nx0 + 1
+            if ny1 <= ny0:
+                ny1 = ny0 + 1
+            r["rect_aligned"] = (int(nx0), int(ny0), int(nx1), int(ny1))
+
+        adjusted.append(r)
+
+    # Overlay adjusted menu regions
     result_array = np.array(result)
-    result = draw_menu_regions(result_array, menu_results)
+    result = draw_menu_regions(result_array, adjusted)
 
     return result
 
@@ -246,9 +306,7 @@ def draw_menu_stage(image_rgb, menu_results, stage="initial"):
             width=3,
         )
 
-        label = (
-            f"{region['name'].upper()} {stage}: {status or 'none'} ({score:.2f})"
-        )
+        label = f"{region['name'].upper()} {stage}: {status or 'none'} ({score:.2f})"
         text_width = (
             draw.textlength(label, font=font)
             if hasattr(draw, "textlength") and font
@@ -319,21 +377,65 @@ def draw_divider_edges(image_rgb, boxes, menu_results):
         if x1 <= x0 or y1 <= y0:
             continue
 
+        detection_rect = region.get("divider_detection_rect") or rect
+        dx0, dy0, dx1, dy1 = detection_rect
+        dx0, dy0 = max(0, dx0), max(0, dy0)
+        dx1, dy1 = min(image_rgb.shape[1], dx1), min(image_rgb.shape[0], dy1)
+
+        base_rect = rect
+        aligned_rect = region.get("rect_aligned")
+
+        if base_rect:
+            bx0, by0, bx1, by1 = [int(round(v)) for v in base_rect]
+            bx0 = max(0, min(overlay_bgr.shape[1] - 1, bx0))
+            bx1 = max(0, min(overlay_bgr.shape[1] - 1, bx1))
+            by0 = max(0, min(overlay_bgr.shape[0] - 1, by0))
+            by1 = max(0, min(overlay_bgr.shape[0] - 1, by1))
+            if bx1 < bx0:
+                bx0, bx1 = bx1, bx0
+            if by1 < by0:
+                by0, by1 = by1, by0
+            cv2.rectangle(
+                overlay_bgr,
+                (bx0, by0),
+                (bx1, by1),
+                (0, 255, 0),
+                1,
+            )
+
+        if aligned_rect:
+            ax0, ay0, ax1, ay1 = [int(round(v)) for v in aligned_rect]
+            ax0 = max(0, min(overlay_bgr.shape[1] - 1, ax0))
+            ax1 = max(0, min(overlay_bgr.shape[1] - 1, ax1))
+            ay0 = max(0, min(overlay_bgr.shape[0] - 1, ay0))
+            ay1 = max(0, min(overlay_bgr.shape[0] - 1, ay1))
+            if ax1 < ax0:
+                ax0, ax1 = ax1, ax0
+            if ay1 < ay0:
+                ay0, ay1 = ay1, ay0
+            cv2.rectangle(
+                overlay_bgr,
+                (ax0, ay0),
+                (ax1, ay1),
+                (255, 0, 255),
+                2,
+            )
+
         edges = region.get("divider_edges")
         if edges is not None:
             edges_arr = np.asarray(edges)
             region_h, region_w = edges_arr.shape[:2]
-            target_h = y1 - y0
-            target_w = x1 - x0
+            target_h = dy1 - dy0
+            target_w = dx1 - dx0
             if region_h != target_h or region_w != target_w:
                 edges_arr = cv2.resize(
                     edges_arr, (target_w, target_h), interpolation=cv2.INTER_NEAREST
                 )
             mask = edges_arr > 0
             if np.any(mask):
-                overlay_region = overlay_bgr[y0:y1, x0:x1]
+                overlay_region = overlay_bgr[dy0:dy1, dx0:dx1]
                 overlay_region[mask] = [0, 255, 255]  # Yellow in BGR
-                overlay_bgr[y0:y1, x0:x1] = overlay_region
+                overlay_bgr[dy0:dy1, dx0:dx1] = overlay_region
 
         candidates = region.get("divider_candidates") or []
         for cand in candidates:

@@ -39,6 +39,8 @@ HOUGH_CANNY_HI = 120
 HOUGH_THRESHOLD = 60
 HOUGH_GAP = 10
 HOUGH_LINE_OFFSET_TOL = 2
+TOP_CORNER_PENALTY_WEIGHT = 0.5
+SIDE_CORNER_PENALTY_WEIGHT = 0.85
 
 
 def _clamp_rect(rect: Tuple[int, int, int, int], width: int, height: int) -> Tuple[int, int, int, int]:
@@ -74,6 +76,21 @@ def _intersection(rect: Tuple[int, int, int, int], box) -> Tuple[int, int, int, 
     if ix1 <= ix0 or iy1 <= iy0:
         return 0, 0, 0, 0
     return ix0, iy0, ix1, iy1
+
+
+def _rect_intersection_rect(
+    rect_a: Tuple[int, int, int, int],
+    rect_b: Tuple[int, int, int, int],
+) -> Optional[Tuple[int, int, int, int]]:
+    ax0, ay0, ax1, ay1 = rect_a
+    bx0, by0, bx1, by1 = rect_b
+    x0 = max(ax0, bx0)
+    y0 = max(ay0, by0)
+    x1 = min(ax1, bx1)
+    y1 = min(ay1, by1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
 
 
 def _overlap_ratio(rect: Tuple[int, int, int, int], box) -> float:
@@ -230,15 +247,16 @@ def spill_penalty(boxes, box_indices, rect):
 
 def _detect_divider_hough(
     name: str,
-    rect: Tuple[int, int, int, int],
+    detect_rect: Tuple[int, int, int, int],
     gray_image: np.ndarray,
+    target_edge: Optional[float] = None,
 ) -> Tuple[
     Optional[Tuple[int, int, int, int]],
     List[Tuple[int, int, int, int]],
     Dict[str, object],
     Optional[np.ndarray],
 ]:
-    x0, y0, x1, y1 = rect
+    x0, y0, x1, y1 = detect_rect
     roi = gray_image[y0:y1, x0:x1]
     if roi.size == 0:
         return None, [], {"reason": "empty_roi"}, None
@@ -257,6 +275,9 @@ def _detect_divider_hough(
 
     span = (x1 - x0) if name == "top" else (y1 - y0)
     min_len = int(max(1, round(0.4 * span)))
+    tall_threshold = (
+        int(max(1, round(0.6 * (y1 - y0)))) if name != "top" else None
+    )
 
     lines = cv2.HoughLinesP(
         edges,
@@ -290,9 +311,48 @@ def _detect_divider_hough(
             if length > best_len:
                 best_len = length
                 best = global_line
+
+        if name == "top" and candidates:
+            bottom_y = detect_rect[3]
+            def top_key(line):
+                _, yA, _, yB = line
+                y_mid = 0.5 * (yA + yB)
+                length = abs(line[2] - line[0])
+                return (abs(bottom_y - y_mid), -length)
+            best = min(candidates, key=top_key)
+            y_mid = 0.5 * (best[1] + best[3])
+            debug["selected_mode"] = "top_bottom_edge"
+            debug["target_edge"] = float(bottom_y)
+            debug["selected_distance"] = float(abs(bottom_y - y_mid))
+            debug["selected_length"] = float(abs(best[2] - best[0]))
+
+        if name != "top" and target_edge is not None and candidates:
+            tall_candidates: List[Tuple[Tuple[int, int, int, int], float, float]] = []
+            for line in candidates:
+                xA, yA, xB, yB = line
+                length = abs(yB - yA)
+                if tall_threshold is not None and length < tall_threshold:
+                    continue
+                line_x = 0.5 * (xA + xB)
+                tall_candidates.append((line, length, line_x))
+
+            if tall_candidates:
+                def candidate_key(item):
+                    _, length, line_x = item
+                    return (abs(line_x - target_edge), -length)
+
+                selected_line, selected_len, selected_x = min(
+                    tall_candidates, key=candidate_key
+                )
+                best = selected_line
+                debug["selected_mode"] = "target_edge"
+                debug["target_edge"] = float(target_edge)
+                debug["selected_distance"] = float(abs(selected_x - target_edge))
+                debug["selected_length"] = float(selected_len)
+            else:
+                debug["selected_mode"] = "longest"
     else:
         debug["num_lines"] = 0
-
     return best, candidates, debug, edges
 
 
@@ -302,8 +362,13 @@ def _score_region(
     boxes,
     texts,
     divider_found: bool = False,
+    exclude_indices: Optional[set[int]] = None,
 ) -> Tuple[Optional[str], float, List[int]]:
-    all_indices = filter_boxes_in_rect(boxes, rect)
+    raw_indices = filter_boxes_in_rect(boxes, rect)
+    if exclude_indices:
+        all_indices = [i for i in raw_indices if i not in exclude_indices]
+    else:
+        all_indices = raw_indices
     main_indices = [
         i
         for i in all_indices
@@ -380,18 +445,22 @@ def _refine_rect(
             min(height, max(ys1) + pad_y),
         )
     elif name == "left":
+        expanded_right = min(width, max(xs1) + pad_x)
+        max_side_width = int(round(width * 0.4))
         refined = (
             0,
-            max(0, min(ys0) - pad_y),
-            min(width, max(xs1) + pad_x),
-            min(height, max(ys1) + pad_y),
+            0,
+            min(expanded_right, max_side_width),
+            height,
         )
     else:  # right
+        expanded_left = max(0, min(xs0) - pad_x)
+        min_x = max(width - int(round(width * 0.4)), expanded_left)
         refined = (
-            max(0, min(xs0) - pad_x),
-            max(0, min(ys0) - pad_y),
+            min_x,
+            0,
             width,
-            min(height, max(ys1) + pad_y),
+            height,
         )
 
     # Enforce top height cap
@@ -405,19 +474,20 @@ def _refine_rect(
 
 def _find_divider(
     name: str,
-    rect: Tuple[int, int, int, int],
+    detect_rect: Tuple[int, int, int, int],
     gray_image: np.ndarray,
+    target_edge: Optional[float] = None,
 ) -> Tuple[
     Optional[Tuple[int, int, int, int]],
     List[Tuple[int, int, int, int]],
     Dict[str, object],
     Optional[np.ndarray],
 ]:
-    x0, y0, x1, y1 = rect
+    x0, y0, x1, y1 = detect_rect
     if x1 - x0 < 3 or y1 - y0 < 3:
         return None, [], {"reason": "rect_too_small"}, None
 
-    return _detect_divider_hough(name, rect, gray_image)
+    return _detect_divider_hough(name, detect_rect, gray_image, target_edge)
 
 
 def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
@@ -441,10 +511,14 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
         region = gray_smoothed[y0:y1, x0:x1]
         if region.size == 0:
             continue
-        kernel_w = 5 if (x1 - x0) >= 5 else 3
-        kernel_h = 5 if (y1 - y0) >= 5 else 3
-        if kernel_w < 3 or kernel_h < 3:
-            continue
+        span_x = max(3, int(round((x1 - x0) * 0.15)) | 1)
+        span_y = max(3, int(round((y1 - y0) * 0.15)) | 1)
+        kernel_w = max(3, span_x)
+        kernel_h = max(3, span_y)
+        if kernel_w % 2 == 0:
+            kernel_w += 1
+        if kernel_h % 2 == 0:
+            kernel_h += 1
         blurred = cv2.GaussianBlur(region, (kernel_w, kernel_h), 0)
         gray_smoothed[y0:y1, x0:x1] = blurred
 
@@ -470,9 +544,12 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
         divider_candidates: List[Tuple[int, int, int, int]] = []
         divider_debug: Dict[str, object] = {}
         divider_edges: Optional[np.ndarray] = None
+        detection_rect = refined_rect
+        divider_target_edge: Optional[float] = None
         final_status = None
         final_score = 0.0
         final_indices: List[int] = []
+        aligned_rect = refined_rect
 
         side_height_ok = True
         if name in ("left", "right"):
@@ -481,18 +558,82 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
             if not side_height_ok:
                 note = "insufficient_height"
 
-        if refined_rect[2] - refined_rect[0] > 0 and refined_rect[3] - refined_rect[1] > 0:
+        if name == "left":
+            expansion = int(round(width * 0.10))
+            inner_edge = refined_rect[2]
+            detection_rect = (
+                refined_rect[0],
+                refined_rect[1],
+                min(width, inner_edge + expansion),
+                refined_rect[3],
+            )
+            divider_target_edge = float(inner_edge)
+        elif name == "right":
+            expansion = int(round(width * 0.10))
+            inner_edge = refined_rect[0]
+            detection_rect = (
+                max(0, inner_edge - expansion),
+                refined_rect[1],
+                refined_rect[2],
+                refined_rect[3],
+            )
+            divider_target_edge = float(inner_edge)
+        else:
+            detection_rect = refined_rect
+            divider_target_edge = None
+            grow = int(round(height * 0.10))
+            detection_rect = (
+                refined_rect[0],
+                refined_rect[1],
+                refined_rect[2],
+                min(height, refined_rect[3] + grow),
+            )
+
+        detection_rect = _clamp_rect(detection_rect, width, height)
+
+        if detection_rect[2] - detection_rect[0] > 0 and detection_rect[3] - detection_rect[1] > 0:
             (
                 divider_line,
                 divider_candidates,
                 divider_debug,
                 divider_edges,
             ) = _find_divider(
-                name, refined_rect, gray_smoothed
+                name, detection_rect, gray_smoothed, divider_target_edge
             )
 
         if not substantial_indices or not side_height_ok:
             divider_line = None
+        else:
+            if divider_line:
+                if name == "left":
+                    line_x = int(round(min(divider_line[0], divider_line[2])))
+                    line_x = max(aligned_rect[0] + 1, min(line_x, aligned_rect[2]))
+                    aligned_rect = (
+                        aligned_rect[0],
+                        aligned_rect[1],
+                        line_x,
+                        aligned_rect[3],
+                    )
+                elif name == "right":
+                    line_x = int(round(max(divider_line[0], divider_line[2])))
+                    line_x = min(aligned_rect[2] - 1, max(line_x, aligned_rect[0]))
+                    aligned_rect = (
+                        line_x,
+                        aligned_rect[1],
+                        aligned_rect[2],
+                        aligned_rect[3],
+                    )
+                elif name == "top":
+                    line_y = int(round(max(divider_line[1], divider_line[3])))
+                    line_y = max(aligned_rect[1] + 1, min(line_y, aligned_rect[3]))
+                    aligned_rect = (
+                        aligned_rect[0],
+                        aligned_rect[1],
+                        aligned_rect[2],
+                        line_y,
+                    )
+                aligned_rect = _clamp_rect(aligned_rect, width, height)
+                divider_debug["aligned_rect"] = aligned_rect
 
         if side_height_ok:
             final_status, final_score, final_indices = _score_region(
@@ -502,6 +643,8 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
                 texts,
                 divider_found=divider_line is not None,
             )
+        else:
+            final_status, final_score, final_indices = None, 0.0, []
 
         results.append(
             {
@@ -518,25 +661,80 @@ def detect_menus(image_rgb, boxes, texts) -> List[MenuResult]:
                 "divider_candidates": divider_candidates,
                 "divider_debug": divider_debug,
                 "divider_edges": divider_edges,
+                "divider_detection_rect": detection_rect,
+                "divider_target_edge": divider_target_edge,
+                 "rect_aligned": aligned_rect,
                 "notes": note,
             }
         )
 
-    # Enforce combined width constraint for side menus
+    top = next((r for r in results if r["name"] == "top"), None)
     left = next((r for r in results if r["name"] == "left"), None)
     right = next((r for r in results if r["name"] == "right"), None)
 
-    if left and right and left.get("status") and right.get("status"):
-        left_width = left["rect"][2] - left["rect"][0]
-        right_width = right["rect"][2] - right["rect"][0]
-        if left_width + right_width > 0.5 * width:
-            gap = abs(float(left["score"]) - float(right["score"]))
-            if gap >= CONFIDENCE_GAP_THRESHOLD:
-                if left["score"] < right["score"]:
-                    left["notes"] = "dropped_due_to_width"
-                    left["status"] = None
-                else:
-                    right["notes"] = "dropped_due_to_width"
-                    right["status"] = None
+    def _apply_corner_penalty(result, overlap_indices: set[int], weight: float):
+        if not result or not overlap_indices:
+            return
+        score = float(result.get("score", 0.0))
+        if score <= 0:
+            return
+        divider_found = bool(result.get("divider"))
+        _, adjusted_score, _ = _score_region(
+            result["name"],
+            result["rect"],
+            boxes,
+            texts,
+            divider_found=divider_found,
+            exclude_indices=overlap_indices,
+        )
+        adjusted_score = float(adjusted_score)
+        delta = max(0.0, score - adjusted_score)
+        if delta <= 0:
+            return
+        penalty = delta * weight
+        new_score = max(0.0, score - penalty)
+        result["score"] = new_score
+        if new_score >= T_DETECT:
+            result["status"] = "menu"
+        elif new_score >= T_UNCERTAIN:
+            result["status"] = "maybe"
+        else:
+            result["status"] = None
+        debug = result.setdefault("divider_debug", {})
+        debug["corner_penalty"] = float(penalty)
+        debug["corner_delta"] = float(delta)
+        note = result.get("notes")
+        if note:
+            if "corner_penalty" not in str(note):
+                result["notes"] = f"{note},corner_penalty"
+        else:
+            result["notes"] = "corner_penalty"
+
+    def _shared_overlap(a, b):
+        if not a or not b or not a.get("rect") or not b.get("rect"):
+            return set()
+        inter_rect = _rect_intersection_rect(a["rect"], b["rect"])
+        if not inter_rect:
+            return set()
+        return set(filter_boxes_in_rect(boxes, inter_rect))
+
+    top_left_overlap = _shared_overlap(top, left)
+    top_right_overlap = _shared_overlap(top, right)
+
+    if top and left and top_left_overlap:
+        top_score = float(top.get("score", 0.0))
+        left_score = float(left.get("score", 0.0))
+        if top_score < left_score:
+            _apply_corner_penalty(top, top_left_overlap, TOP_CORNER_PENALTY_WEIGHT)
+        else:
+            _apply_corner_penalty(left, top_left_overlap, SIDE_CORNER_PENALTY_WEIGHT)
+
+    if top and right and top_right_overlap:
+        top_score = float(top.get("score", 0.0))
+        right_score = float(right.get("score", 0.0))
+        if top_score < right_score:
+            _apply_corner_penalty(top, top_right_overlap, TOP_CORNER_PENALTY_WEIGHT)
+        else:
+            _apply_corner_penalty(right, top_right_overlap, SIDE_CORNER_PENALTY_WEIGHT)
 
     return results

@@ -5,17 +5,21 @@ OCR processing module for PaddleOCR integration.
 from collections.abc import Mapping
 from numbers import Number
 from paddleocr import PaddleOCR
+import os
+import platform
+
+print(platform.machine())
 
 
 def init_ocr():
     """Initialize PaddleOCR model with optimized settings."""
     ocr = PaddleOCR(
         lang="en",
-        use_textline_orientation=True,  # new in 3.x; replaces use_angle_cls
+        use_textline_orientation=False,  # new in 3.x; replaces use_angle_cls
         use_doc_unwarping=False,
         det_limit_type="max",  # enforce a hard size limit on detector input
-        det_limit_side_len=1536,  # detector won't process larger than this
-        rec_batch_num=2,  # smaller batches → lower peak memory
+        det_limit_side_len=1080,  # detector won't process larger than this
+        rec_batch_num=4,  # smaller batches → lower peak memory
     )
     return ocr
 
