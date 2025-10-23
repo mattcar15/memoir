@@ -17,9 +17,17 @@ def init_ocr():
         lang="en",
         use_textline_orientation=False,  # new in 3.x; replaces use_angle_cls
         use_doc_unwarping=False,
-        det_limit_type="max",  # enforce a hard size limit on detector input
-        det_limit_side_len=1080,  # detector won't process larger than this
-        rec_batch_num=4,  # smaller batches → lower peak memory
+        text_detection_model_name="PP-OCRv5_mobile_det",
+        text_detection_model_dir=os.path.expanduser(
+            "~/.paddlex/official_models/PP-OCRv5_mobile_det"
+        ),
+        text_recognition_model_name="en_PP-OCRv5_mobile_rec",
+        text_recognition_model_dir=os.path.expanduser(
+            "~/.paddlex/official_models/en_PP-OCRv5_mobile_rec"
+        ),
+        text_det_limit_type="max",  # enforce a hard size limit on detector input
+        text_det_limit_side_len=1080,  # detector won't process larger than this
+        text_recognition_batch_size=4,  # smaller batches → lower peak memory
     )
     return ocr
 
