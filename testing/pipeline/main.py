@@ -155,8 +155,14 @@ def process_image(get_ocr_model, image_path, output_dir, reuse_ocr=False):
     step_images = [
         ("step0_original.png", Image.fromarray(image_rgb)),
         ("step1_ocr_boxes.png", draw_ocr_boxes(image_rgb, boxes, texts, scores)),
-        ("step2_initial_menus.png", draw_menu_stage(image_rgb, menu_results, stage="initial")),
-        ("step3_refined_menus.png", draw_menu_stage(image_rgb, menu_results, stage="final")),
+        (
+            "step2_initial_menus.png",
+            draw_menu_stage(image_rgb, menu_results, stage="initial"),
+        ),
+        (
+            "step3_refined_menus.png",
+            draw_menu_stage(image_rgb, menu_results, stage="final"),
+        ),
         ("step4_divider_edges.png", draw_divider_edges(image_rgb, boxes, menu_results)),
         ("step5_combined.png", output_image),
     ]
@@ -170,6 +176,41 @@ def process_image(get_ocr_model, image_path, output_dir, reuse_ocr=False):
     print(f"Visualization time: {viz_time:.2f}s")
     print(f"Saved processing steps to: {image_output_dir}")
     print(f"Final combined output: {final_path}")
+
+    # Step 6: Extract text groups excluding menu text
+    extract_start = time.perf_counter()
+    menu_indices = set()
+    for region in menu_results:
+        if region.get("status") in ("menu", "maybe"):
+            menu_indices.update(region.get("indices", []))
+
+    # Collect text from groups, excluding menu items
+    text_groups = []
+    for group_indices in groups:
+        group_texts = []
+        for idx in group_indices:
+            if idx not in menu_indices and idx < len(texts):
+                text = texts[idx]
+                if text and text.strip():
+                    group_texts.append(text.strip())
+
+        if group_texts:
+            # Join texts in this group with spaces
+            group_text = " ".join(group_texts)
+            text_groups.append(group_text)
+
+    # Save as ordered list
+    text_output_path = image_output_dir / "extracted_text.txt"
+    with text_output_path.open("w", encoding="utf-8") as f:
+        for i, text in enumerate(text_groups, 1):
+            f.write(f"{i}. {text}\n\n")
+
+    extract_time = time.perf_counter() - extract_start
+    print(f"Text extraction time: {extract_time:.2f}s")
+    print(
+        f"Extracted {len(text_groups)} text groups (excluding {len(menu_indices)} menu items)"
+    )
+    print(f"Saved text groups to: {text_output_path}")
 
     total_time = time.perf_counter() - start_time
     print(f"TOTAL TIME: {total_time:.2f}s")
@@ -239,7 +280,9 @@ def main():
     overall_start = time.perf_counter()
     for image_path in image_paths:
         try:
-            process_image(get_ocr_model, image_path, output_dir, reuse_ocr=args.reuse_ocr)
+            process_image(
+                get_ocr_model, image_path, output_dir, reuse_ocr=args.reuse_ocr
+            )
         except Exception as e:
             print(f"ERROR processing {image_path.name}: {e}")
             import traceback
