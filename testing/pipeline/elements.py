@@ -102,28 +102,29 @@ def create_text_removed_image(image_rgb, boxes):
     return result
 
 
-def detect_lines_and_cuts(
+def detect_structural_lines(
     image_rgb,
     boxes,
     min_line_length_ratio=0.16,
     max_gap=8,
     angle_tolerance=2.0,
     dilation_size=4,
-    projection_gap=15,
 ):
     """
-    Detect structural lines and whitespace cuts using Hough transform and XY-cut.
+    Detect structural lines and borders using Hough transform.
 
     Returns:
         - edges: Canny edge image
-        - lines: Detected line segments
+        - horizontal_lines: Raw horizontal line candidates with length
+        - vertical_lines: Raw vertical line candidates with length
+        - h_lines: Merged horizontal lines
+        - v_lines: Merged vertical lines
         - separator_mask: Binary mask of separator lines
-        - cut_lines: Dict with 'horizontal' and 'vertical' cut positions
-        - visualization: RGB image showing the results
+        - gray_processed: Text-removed grayscale image
     """
     height, width = image_rgb.shape[:2]
 
-    # Step 1: Create text-removed BW image
+    # Step 1: Create text-removed BW image for better line detection
     gray_processed = create_text_removed_image(image_rgb, boxes)
 
     # Step 2: Enhanced edge detection
@@ -255,8 +256,37 @@ def detect_lines_and_cuts(
     kernel = np.ones((dilation_size, dilation_size), np.uint8)
     separator_mask = cv2.dilate(separator_mask, kernel, iterations=1)
 
-    # Step 6: XY-cut - find whitespace gaps
-    # Create binary foreground: edges OR text boxes
+    return {
+        "edges": edges,
+        "horizontal_lines": horizontal_lines,
+        "vertical_lines": vertical_lines,
+        "h_lines": h_lines,
+        "v_lines": v_lines,
+        "separator_mask": separator_mask,
+        "gray_processed": gray_processed,
+    }
+
+
+def detect_whitespace_cuts(image_rgb, boxes, projection_gap=15):
+    """
+    Detect whitespace gaps using XY-cut projection analysis.
+    Uses the original image (not text-removed) to find actual content gaps.
+
+    Returns:
+        - horizontal_cuts: Y positions of horizontal gaps
+        - vertical_cuts: X positions of vertical gaps
+        - capped_h_cuts: Horizontal cuts with x1, y, x2, y bounds
+        - capped_v_cuts: Vertical cuts with x, y1, x, y2 bounds
+    """
+    height, width = image_rgb.shape[:2]
+
+    # Convert to grayscale (use original image, not text-removed)
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+
+    # Apply Canny to get edges from original image
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+    # Create text mask from OCR boxes
     text_mask = np.zeros((height, width), dtype=np.uint8)
     for box in boxes:
         if not box:
@@ -300,32 +330,122 @@ def detect_lines_and_cuts(
     horizontal_cuts = find_gaps(horizontal_projection, projection_gap)
     vertical_cuts = find_gaps(vertical_projection, projection_gap)
 
-    # Step 7: Create visualization
-    vis_image = cv2.cvtColor(gray_processed, cv2.COLOR_GRAY2RGB)
+    # Cap the cut lines to span only the content regions
+    def cap_horizontal_cut(y_pos, vertical_proj, threshold):
+        """Find left and right bounds for a horizontal cut line."""
+        # Find leftmost content
+        x_start = 0
+        for x in range(len(vertical_proj)):
+            if vertical_proj[x] > threshold:
+                x_start = x
+                break
+
+        # Find rightmost content
+        x_end = len(vertical_proj) - 1
+        for x in range(len(vertical_proj) - 1, -1, -1):
+            if vertical_proj[x] > threshold:
+                x_end = x
+                break
+
+        return x_start, x_end
+
+    def cap_vertical_cut(x_pos, horizontal_proj, threshold):
+        """Find top and bottom bounds for a vertical cut line."""
+        # Find topmost content
+        y_start = 0
+        for y in range(len(horizontal_proj)):
+            if horizontal_proj[y] > threshold:
+                y_start = y
+                break
+
+        # Find bottommost content
+        y_end = len(horizontal_proj) - 1
+        for y in range(len(horizontal_proj) - 1, -1, -1):
+            if horizontal_proj[y] > threshold:
+                y_end = y
+                break
+
+        return y_start, y_end
+
+    # Cap cut lines to content bounds
+    threshold = (
+        np.max(np.concatenate([horizontal_projection, vertical_projection])) * 0.05
+    )
+    capped_h_cuts = []
+    for y in horizontal_cuts:
+        x_start, x_end = cap_horizontal_cut(y, vertical_projection, threshold)
+        capped_h_cuts.append((x_start, y, x_end, y))
+
+    capped_v_cuts = []
+    for x in vertical_cuts:
+        y_start, y_end = cap_vertical_cut(x, horizontal_projection, threshold)
+        capped_v_cuts.append((x, y_start, x, y_end))
+
+    return {
+        "horizontal_cuts": horizontal_cuts,
+        "vertical_cuts": vertical_cuts,
+        "capped_h_cuts": capped_h_cuts,
+        "capped_v_cuts": capped_v_cuts,
+    }
+
+
+def detect_lines_and_cuts(
+    image_rgb,
+    boxes,
+    min_line_length_ratio=0.16,
+    max_gap=8,
+    angle_tolerance=2.0,
+    dilation_size=4,
+    projection_gap=15,
+):
+    """
+    Detect structural lines and whitespace cuts.
+    Combines Hough line detection with XY-cut projection analysis.
+
+    Returns:
+        - edges: Canny edge image
+        - lines: Detected line segments
+        - separator_mask: Binary mask of separator lines
+        - cut_lines: Dict with 'horizontal' and 'vertical' cut positions
+        - capped_cut_lines: Dict with capped cut line coordinates
+        - visualization: RGB image showing the results
+    """
+    # Detect structural lines using text-removed image
+    line_results = detect_structural_lines(
+        image_rgb, boxes, min_line_length_ratio, max_gap, angle_tolerance, dilation_size
+    )
+
+    # Detect whitespace cuts using original image
+    cut_results = detect_whitespace_cuts(image_rgb, boxes, projection_gap)
+
+    # Create visualization
+    vis_image = cv2.cvtColor(line_results["gray_processed"], cv2.COLOR_GRAY2RGB)
 
     # Draw edges in yellow (faint)
     edge_overlay = vis_image.copy()
-    edge_overlay[edges > 0] = [255, 255, 0]
+    edge_overlay[line_results["edges"] > 0] = [255, 255, 0]
     vis_image = cv2.addWeighted(vis_image, 0.7, edge_overlay, 0.3, 0)
 
     # Draw raw Hough candidates in orange (before merging)
-    for x1, y1, x2, y2, _ in horizontal_lines + vertical_lines:
+    for x1, y1, x2, y2, _ in (
+        line_results["horizontal_lines"] + line_results["vertical_lines"]
+    ):
         cv2.line(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (255, 165, 0), 1)
 
     # Draw merged lines in green (thicker)
-    for x1, y1, x2, y2 in h_lines + v_lines:
+    for x1, y1, x2, y2 in line_results["h_lines"] + line_results["v_lines"]:
         cv2.line(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
     # Draw separator mask in magenta (semi-transparent)
     separator_overlay = vis_image.copy()
-    separator_overlay[separator_mask > 0] = [255, 0, 255]
+    separator_overlay[line_results["separator_mask"] > 0] = [255, 0, 255]
     vis_image = cv2.addWeighted(vis_image, 0.8, separator_overlay, 0.2, 0)
 
-    # Draw cut lines in cyan
-    for y in horizontal_cuts:
-        cv2.line(vis_image, (0, int(y)), (width, int(y)), (0, 255, 255), 1)
-    for x in vertical_cuts:
-        cv2.line(vis_image, (int(x), 0), (int(x), height), (0, 255, 255), 1)
+    # Draw capped cut lines in cyan
+    for x1, y, x2, _ in cut_results["capped_h_cuts"]:
+        cv2.line(vis_image, (int(x1), int(y)), (int(x2), int(y)), (0, 255, 255), 1)
+    for x, y1, _, y2 in cut_results["capped_v_cuts"]:
+        cv2.line(vis_image, (int(x), int(y1)), (int(x), int(y2)), (0, 255, 255), 1)
 
     # Convert numpy types to Python types for JSON serialization
     def convert_to_python_types(obj):
@@ -345,11 +465,22 @@ def detect_lines_and_cuts(
         return obj
 
     return {
-        "edges": edges,
-        "lines": convert_to_python_types({"horizontal": h_lines, "vertical": v_lines}),
-        "separator_mask": separator_mask,
+        "edges": line_results["edges"],
+        "lines": convert_to_python_types(
+            {"horizontal": line_results["h_lines"], "vertical": line_results["v_lines"]}
+        ),
+        "separator_mask": line_results["separator_mask"],
         "cut_lines": convert_to_python_types(
-            {"horizontal": horizontal_cuts, "vertical": vertical_cuts}
+            {
+                "horizontal": cut_results["horizontal_cuts"],
+                "vertical": cut_results["vertical_cuts"],
+            }
+        ),
+        "capped_cut_lines": convert_to_python_types(
+            {
+                "horizontal": cut_results["capped_h_cuts"],
+                "vertical": cut_results["capped_v_cuts"],
+            }
         ),
         "visualization": Image.fromarray(vis_image),
     }
