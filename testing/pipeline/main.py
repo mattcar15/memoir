@@ -9,6 +9,7 @@ import json
 import time
 from pathlib import Path
 import sys
+import shutil
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -122,6 +123,10 @@ def process_image(
     if run_menu:
         menu_dir.mkdir(parents=True, exist_ok=True)
     if run_elements:
+        # Clean element_segmentation folder if it exists to see fresh results
+        if element_dir.exists():
+            shutil.rmtree(element_dir)
+            print(f"Cleaned existing element_segmentation folder")
         element_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Load and resize
@@ -456,25 +461,113 @@ def process_image(
                 ("step4_segmentation.png", step4_segmentation),
             ]
 
+            # Save intermediate structural line detection steps
+            intermediate = segmentation_results["intermediate_steps"]
+            element_steps.extend(
+                [
+                    (
+                        "step4a_text_removed.png",
+                        Image.fromarray(intermediate["text_removed"]),
+                    ),
+                    (
+                        "step4b_clahe_enhanced.png",
+                        Image.fromarray(intermediate["clahe_enhanced"]),
+                    ),
+                    (
+                        "step4c_z_normalized.png",
+                        Image.fromarray(intermediate["z_normalized"]),
+                    ),
+                    (
+                        "step4d_gradient_magnitude.png",
+                        Image.fromarray(intermediate["gradient_magnitude"]),
+                    ),
+                    (
+                        "step4e_edges_adaptive.png",
+                        Image.fromarray(intermediate["edges_adaptive"]),
+                    ),
+                    (
+                        "step4f_blackhat_mask.png",
+                        Image.fromarray(intermediate["blackhat_mask"]),
+                    ),
+                    (
+                        "step4g_axis_aligned_edges.png",
+                        Image.fromarray(intermediate["axis_aligned_edges"]),
+                    ),
+                    (
+                        "step4h_edges_final.png",
+                        Image.fromarray(intermediate["edges_final"]),
+                    ),
+                ]
+            )
+
+            # Save image detection steps if available
+            if "image_detection_steps" in segmentation_results:
+                img_steps = segmentation_results["image_detection_steps"]
+                element_steps.extend(
+                    [
+                        (
+                            "step5a_text_removed.png",
+                            Image.fromarray(img_steps["text_removed"]),
+                        ),
+                        (
+                            "step5b_gradient_map.png",
+                            Image.fromarray(img_steps["gradient_map"]),
+                        ),
+                        (
+                            "step5c_edges_all.png",
+                            Image.fromarray(img_steps["edges_all"]),
+                        ),
+                        (
+                            "step5d_edges_sparse.png",
+                            Image.fromarray(img_steps["edges_sparse"]),
+                        ),
+                        (
+                            "step5e_angle_visualization.png",
+                            Image.fromarray(img_steps["angle_visualization"]),
+                        ),
+                        (
+                            "step5f_edges_connected.png",
+                            Image.fromarray(img_steps["edges_connected"]),
+                        ),
+                        (
+                            "step5g_z_normalized.png",
+                            Image.fromarray(img_steps["z_normalized"]),
+                        ),
+                        (
+                            "step5h_grown_boxes.png",
+                            Image.fromarray(img_steps["grown_boxes"]),
+                        ),
+                    ]
+                )
+
+                # Save dilation comparison images
+                if "dilation_comparisons" in img_steps:
+                    for i, dil_result in enumerate(img_steps["dilation_comparisons"]):
+                        filename = (
+                            f"step5_dilation_k{dil_result['kernel_size']}_"
+                            f"i{dil_result['iterations']}_n{dil_result['num_clusters']}.png"
+                        )
+                        element_steps.append((filename, dil_result["image"]))
+
             for filename, pil_image in element_steps:
                 save_path = element_dir / filename
                 pil_image.save(save_path)
 
             # Also save segmentation data as JSON
             segmentation_data_path = element_dir / "segmentation_data.json"
+            data_to_save = {
+                "horizontal_lines": segmentation_results["lines"]["horizontal"],
+                "vertical_lines": segmentation_results["lines"]["vertical"],
+                "horizontal_cuts": segmentation_results["cut_lines"]["horizontal"],
+                "vertical_cuts": segmentation_results["cut_lines"]["vertical"],
+            }
+
+            # Add image boxes if detected
+            if "image_boxes" in segmentation_results:
+                data_to_save["image_boxes"] = segmentation_results["image_boxes"]
+
             with segmentation_data_path.open("w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "horizontal_lines": segmentation_results["lines"]["horizontal"],
-                        "vertical_lines": segmentation_results["lines"]["vertical"],
-                        "horizontal_cuts": segmentation_results["cut_lines"][
-                            "horizontal"
-                        ],
-                        "vertical_cuts": segmentation_results["cut_lines"]["vertical"],
-                    },
-                    f,
-                    indent=2,
-                )
+                json.dump(data_to_save, f, indent=2)
 
             element_viz_time = time.perf_counter() - element_viz_start
             crop_time = time.perf_counter() - crop_start
@@ -495,6 +588,10 @@ def process_image(
                 f"Found {len(segmentation_results['cut_lines']['horizontal'])} horizontal cuts, "
                 f"{len(segmentation_results['cut_lines']['vertical'])} vertical cuts"
             )
+            if "image_boxes" in segmentation_results:
+                print(
+                    f"Detected {len(segmentation_results['image_boxes'])} image regions"
+                )
             print(f"Saved element segmentation to: {element_dir}")
             print(f"Saved cropped OCR to: {cropped_ocr_path}")
             print(f"Saved segmentation data to: {segmentation_data_path}")

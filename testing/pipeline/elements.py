@@ -6,6 +6,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import cv2
 from utils import box_bounds
+from image_detection import detect_images
+
+
+__all__ = [
+    "draw_element_ocr_boxes",
+    "create_text_removed_image",
+    "detect_structural_lines",
+    "detect_whitespace_cuts",
+    "detect_lines_and_cuts",
+]
 
 
 def draw_element_ocr_boxes(image_rgb, boxes, texts=None, scores=None, drop_score=0.5):
@@ -125,32 +135,81 @@ def detect_structural_lines(
     height, width = image_rgb.shape[:2]
 
     # Step 1: Create text-removed BW image for better line detection
-    gray_processed = create_text_removed_image(image_rgb, boxes)
+    gray_processed = create_text_removed_image(image_rgb, boxes)  # uint8, 0..255
 
-    # Step 2: Enhanced edge detection
-    # Apply bilateral filter to reduce noise while preserving edges
-    filtered = cv2.bilateralFilter(gray_processed, 9, 75, 75)
+    # --- Step 2: CLAHE (debanded) ---
+    # Bigger tiles + lower clip to avoid blocky "steps". Use L-only style since we're already gray.
+    # Pick tile size by image scale.
+    tile = 64 if max(height, width) >= 1200 else 32
+    clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(tile, tile))
+    gray_clahe = clahe.apply(gray_processed)
 
-    # Use adaptive thresholding to find strong edges
-    binary = cv2.adaptiveThreshold(
-        filtered, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    # very light debanding to smooth tile seams (does not wash edges)
+    gray_enhanced = cv2.GaussianBlur(gray_clahe, (0, 0), 1.0)
+
+    # --- Step 3: Gaussian divisive normalization (contrast-invariant) ---
+    # Window scale ~3% of min dimension; ensures normalization matches UI divider scale.
+    r = int(max(9, round(0.03 * min(height, width))))  # radius proxy (odd-ish scale)
+    sigma_blur = max(1.5, r / 6.0)  # convert to Gaussian sigma
+
+    L = gray_enhanced.astype(np.float32)
+    mu = cv2.GaussianBlur(L, (0, 0), sigma_blur)
+    sq = cv2.GaussianBlur(L * L, (0, 0), sigma_blur)
+    sigma = np.sqrt(np.maximum(sq - mu * mu, 1e-6))
+
+    # clip sigma to avoid over-boosting flat/noisy patches
+    sigma = np.clip(sigma, 5.0, 40.0)
+
+    Z = (L - mu) / (sigma + 1e-6)  # local Z-score
+    Z = np.tanh(0.5 * Z)  # soft-compress outliers
+    Z = np.clip((Z * 80.0 + 128.0), 0, 255).astype(np.uint8)  # back to uint8 0..255
+
+    # Step 4: Edge detection without fixed Canny thresholds
+    # Use Scharr for better small-signal response
+    gx = cv2.Scharr(Z, cv2.CV_32F, 1, 0)
+    gy = cv2.Scharr(Z, cv2.CV_32F, 0, 1)
+    mag = cv2.magnitude(gx, gy)
+
+    # Percentile-based adaptive thresholds
+    hi = np.percentile(mag, 96)
+    lo = 0.4 * hi
+
+    strong = (mag >= hi).astype(np.uint8) * 255
+    weak = ((mag >= lo) & (mag < hi)).astype(np.uint8) * 255
+
+    # Hysteresis: keep weak pixels connected to strong
+    M = cv2.dilate(strong, np.ones((3, 3), np.uint8), 1)
+    edges_adapt = cv2.bitwise_or(strong, cv2.bitwise_and(weak, M))
+
+    # Step 5: Black-hat for dark-on-dark dividers
+    k_bh = 21  # divider thickness scale
+    bh = cv2.morphologyEx(Z, cv2.MORPH_BLACKHAT, np.ones((k_bh, k_bh), np.uint8))
+    bh_mask = (bh >= np.percentile(bh, 92)).astype(np.uint8) * 255
+
+    # Step 6: Filter for axis-aligned edges (prefer horizontal/vertical)
+    angle = cv2.phase(gx, gy, angleInDegrees=True)
+    axis = ((np.abs(((angle + 90) % 180) - 90) < 8) | (np.abs(angle) < 8)).astype(
+        np.uint8
     )
+    axis_mask = (axis * 255).astype(np.uint8)
+    edges_axis = cv2.bitwise_and(edges_adapt, axis_mask)
 
-    # Canny edge detection with tighter thresholds
-    edges = cv2.Canny(filtered, 50, 150)
+    # Step 7: Combine contrast-normalized edges and black-hat
+    edges = cv2.bitwise_or(edges_axis, bh_mask)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8), 1)
 
-    # Step 3: Probabilistic Hough Line Transform with stricter parameters
+    # Step 8: Probabilistic Hough Line Transform
     min_line_length = int(width * min_line_length_ratio)
     lines = cv2.HoughLinesP(
         edges,
         rho=1,
         theta=np.pi / 180,
-        threshold=60,  # Increased threshold for stronger lines
+        threshold=50,  # Lower threshold to catch subtle lines (CLAHE helps reduce noise)
         minLineLength=min_line_length,
         maxLineGap=max_gap,
     )
 
-    # Step 4: Filter and merge near-horizontal/vertical lines
+    # Step 9: Filter and merge near-horizontal/vertical lines
     horizontal_lines = []
     vertical_lines = []
 
@@ -246,7 +305,7 @@ def detect_structural_lines(
     h_lines = merge_lines(horizontal_lines, True)
     v_lines = merge_lines(vertical_lines, False)
 
-    # Step 5: Create separator mask by dilating lines
+    # Step 10: Create separator mask by dilating lines
     separator_mask = np.zeros((height, width), dtype=np.uint8)
 
     for x1, y1, x2, y2 in h_lines + v_lines:
@@ -264,6 +323,19 @@ def detect_structural_lines(
         "v_lines": v_lines,
         "separator_mask": separator_mask,
         "gray_processed": gray_processed,
+        # Intermediate processing steps for visualization
+        "intermediate_steps": {
+            "text_removed": gray_processed,
+            "clahe_enhanced": gray_enhanced,
+            "z_normalized": Z,
+            "gradient_magnitude": np.clip(mag / np.max(mag) * 255, 0, 255).astype(
+                np.uint8
+            ),
+            "edges_adaptive": edges_adapt,
+            "blackhat_mask": bh_mask,
+            "axis_aligned_edges": edges_axis,
+            "edges_final": edges,
+        },
     }
 
 
@@ -397,10 +469,11 @@ def detect_lines_and_cuts(
     angle_tolerance=2.0,
     dilation_size=4,
     projection_gap=15,
+    detect_image_regions=True,
 ):
     """
-    Detect structural lines and whitespace cuts.
-    Combines Hough line detection with XY-cut projection analysis.
+    Detect structural lines, whitespace cuts, and image regions.
+    Combines Hough line detection with XY-cut projection analysis and image detection.
 
     Returns:
         - edges: Canny edge image
@@ -408,6 +481,7 @@ def detect_lines_and_cuts(
         - separator_mask: Binary mask of separator lines
         - cut_lines: Dict with 'horizontal' and 'vertical' cut positions
         - capped_cut_lines: Dict with capped cut line coordinates
+        - image_boxes: List of detected image/photo regions
         - visualization: RGB image showing the results
     """
     # Detect structural lines using text-removed image
@@ -417,6 +491,11 @@ def detect_lines_and_cuts(
 
     # Detect whitespace cuts using original image
     cut_results = detect_whitespace_cuts(image_rgb, boxes, projection_gap)
+
+    # Detect image/photo regions
+    image_results = None
+    if detect_image_regions:
+        image_results = detect_images(image_rgb, boxes)
 
     # Create visualization
     vis_image = cv2.cvtColor(line_results["gray_processed"], cv2.COLOR_GRAY2RGB)
@@ -447,6 +526,23 @@ def detect_lines_and_cuts(
     for x, y1, _, y2 in cut_results["capped_v_cuts"]:
         cv2.line(vis_image, (int(x), int(y1)), (int(x), int(y2)), (0, 255, 255), 1)
 
+    # Draw detected image boxes in blue
+    if image_results:
+        for x, y, w, h in image_results["image_boxes"]:
+            cv2.rectangle(
+                vis_image, (int(x), int(y)), (int(x + w), int(y + h)), (255, 0, 0), 2
+            )
+            # Add label
+            cv2.putText(
+                vis_image,
+                "IMAGE",
+                (int(x + 5), int(y + 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 0, 0),
+                2,
+            )
+
     # Convert numpy types to Python types for JSON serialization
     def convert_to_python_types(obj):
         """Recursively convert numpy types to Python types."""
@@ -464,7 +560,7 @@ def detect_lines_and_cuts(
             return {key: convert_to_python_types(value) for key, value in obj.items()}
         return obj
 
-    return {
+    result = {
         "edges": line_results["edges"],
         "lines": convert_to_python_types(
             {"horizontal": line_results["h_lines"], "vertical": line_results["v_lines"]}
@@ -483,4 +579,11 @@ def detect_lines_and_cuts(
             }
         ),
         "visualization": Image.fromarray(vis_image),
+        "intermediate_steps": line_results["intermediate_steps"],
     }
+
+    if image_results:
+        result["image_boxes"] = convert_to_python_types(image_results["image_boxes"])
+        result["image_detection_steps"] = image_results["intermediate_steps"]
+
+    return result
