@@ -1,16 +1,18 @@
 """
-Process management for running capture and server concurrently.
+Process management for running window monitor and queue processor concurrently.
 """
 
-import asyncio
 import signal
-import sys
 import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from .cli import run_capture_loop
+from .window_monitor import WindowMonitor
+from .queue import ProcessingQueue
+from .queue_processor import QueueProcessor
+from .pipeline.main import ImagePipeline
+from .vector_store import VectorStore
 from .server import run_server
 
 
@@ -25,68 +27,116 @@ def signal_handler(sig, frame):
     running = False
 
 
-def run_capture_process(
-    resolution_tier: str,
-    save_images: bool,
-    logs_dir: Path,
-    screenshots_dir: Path,
-    model_name: str,
-    vector_store=None,
-    embedding_model: str = "embeddinggemma",
-    interval: int = 1,
-    run_once: bool = False,
-    compare_tiers: bool = False,
-    power_efficient: bool = False,
+def run_window_monitor_process(
+    staging_dir: Path,
+    queue: ProcessingQueue,
+    phash_threshold: int = 10,
+    poll_interval: float = 0.5,
+    debug: bool = False,
 ):
     """
-    Run the capture process in a separate thread.
-
+    Run the window monitor process.
+    
     Args:
-        resolution_tier: Resolution tier to use
-        save_images: Whether to save screenshot images
-        logs_dir: Path to logs directory
-        screenshots_dir: Path to screenshots directory
-        model_name: Ollama model name
-        vector_store: Optional VectorStore instance
-        embedding_model: Embedding model name
-        interval: Minutes between captures
-        run_once: Whether to run once and exit
-        compare_tiers: Whether to compare all resolution tiers
-        power_efficient: If True, use power-efficient settings
+        staging_dir: Directory to save captured frames
+        queue: ProcessingQueue instance
+        phash_threshold: pHash threshold for duplicate detection
+        poll_interval: Seconds between window checks
+        debug: If True, print debug messages
     """
+    def on_capture(frame_path, metadata):
+        """Callback when a frame is captured."""
+        if debug:
+            print(f"✅ Captured: {frame_path.name}")
+        queue.enqueue(frame_path, metadata)
+        if debug:
+            print(f"📥 Queued (pending: {queue.get_pending_count()})")
+    
+    monitor = WindowMonitor(
+        capture_dir=staging_dir,
+        on_capture_callback=on_capture,
+        phash_threshold=phash_threshold,
+        poll_interval=poll_interval,
+        debug=debug,
+    )
+    
     try:
-        run_capture_loop(
-            resolution_tier=resolution_tier,
-            save_images=save_images,
-            logs_dir=logs_dir,
-            screenshots_dir=screenshots_dir,
-            model_name=model_name,
-            vector_store=vector_store,
-            embedding_model=embedding_model,
-            interval=interval,
-            run_once=run_once,
-            compare_tiers=compare_tiers,
-            power_efficient=power_efficient,
-        )
-    except KeyboardInterrupt:
-        print("📷 Capture process stopped")
+        monitor.start()
+        
+        # Keep thread alive
+        while running:
+            time.sleep(1)
+            
+            # Periodic cleanup
+            if int(time.time()) % 3600 == 0:  # Every hour
+                monitor.cleanup_old_hashes(max_age_hours=24)
     except Exception as e:
-        print(f"❌ Error in capture process: {e}")
+        print(f"❌ Error in window monitor process: {e}")
+    finally:
+        monitor.stop()
+        print("📷 Window monitor stopped")
+
+
+def run_queue_processor_process(
+    queue: ProcessingQueue,
+    pipeline: ImagePipeline,
+    output_dir: Optional[Path],
+    debug: bool = False,
+    check_interval: float = 2.0,
+):
+    """
+    Run the queue processor process.
+    
+    Args:
+        queue: ProcessingQueue instance
+        pipeline: ImagePipeline instance
+        output_dir: Directory to save processed images
+        debug: If True, keep captured frames
+        check_interval: Seconds between queue checks
+    """
+    processor = QueueProcessor(
+        queue=queue,
+        pipeline=pipeline,
+        output_dir=output_dir,
+        debug=debug,
+        check_interval=check_interval,
+    )
+    
+    try:
+        processor.start()
+        
+        # Keep thread alive and run periodic maintenance
+        last_maintenance = time.time()
+        maintenance_interval = 3600  # 1 hour
+        
+        while running:
+            time.sleep(60)  # Check every minute
+            
+            # Periodic maintenance
+            if time.time() - last_maintenance > maintenance_interval:
+                processor.run_maintenance()
+                last_maintenance = time.time()
+    except Exception as e:
+        print(f"❌ Error in queue processor process: {e}")
+    finally:
+        processor.stop()
+        processor.print_stats()
+        print("⚙️  Queue processor stopped")
 
 
 def run_server_process(
     logs_dir: Path,
-    vector_store,
+    vector_store: Optional[VectorStore],
     embedding_model: str = "embeddinggemma",
     host: str = "0.0.0.0",
     port: int = 8000,
 ):
     """
-    Run the server process in a separate thread.
-
+    Run the server process.
+    
     Args:
         logs_dir: Path to logs directory
-        vector_store: VectorStore instance
+        vector_store: Optional VectorStore instance
         embedding_model: Embedding model name
         host: Host to bind to
         port: Port to bind to
@@ -106,197 +156,131 @@ def run_server_process(
 
 
 def run_both(
-    resolution_tier: str,
-    save_images: bool,
     logs_dir: Path,
-    screenshots_dir: Path,
-    model_name: str,
-    vector_store=None,
+    staging_dir: Path,
+    output_dir: Optional[Path],
+    queue_db: Path,
+    vector_store: Optional[VectorStore] = None,
     embedding_model: str = "embeddinggemma",
-    interval: int = 1,
-    run_once: bool = False,
-    compare_tiers: bool = False,
+    similarity_threshold: float = 0.7,
+    memory_window: int = 5,
+    phash_threshold: int = 10,
+    debug: bool = False,
+    verbose: bool = False,
+    no_llm: bool = False,
     server_host: str = "0.0.0.0",
     server_port: int = 8000,
-    power_efficient: bool = False,
 ):
     """
-    Run both capture and server processes concurrently.
-
+    Run all processes concurrently: window monitor, queue processor, and server.
+    
     Args:
-        resolution_tier: Resolution tier to use
-        save_images: Whether to save screenshot images
         logs_dir: Path to logs directory
-        screenshots_dir: Path to screenshots directory
-        model_name: Ollama model name
+        staging_dir: Path to staging directory for captured frames
+        output_dir: Path to output directory for processed images
+        queue_db: Path to queue database
         vector_store: Optional VectorStore instance
         embedding_model: Embedding model name
-        interval: Minutes between captures
-        run_once: Whether to run once and exit
-        compare_tiers: Whether to compare all resolution tiers
+        similarity_threshold: Cosine similarity threshold for memory consolidation
+        memory_window: Memory window in minutes
+        phash_threshold: pHash threshold for duplicate detection
+        debug: If True, enable debug mode
+        verbose: If True, show detailed processing information
+        no_llm: If True, disable MLX VLM processing
         server_host: Host to bind server to
         server_port: Port to bind server to
     """
     global running
-
-    # Set up signal handler for graceful shutdown (only in main thread)
+    
+    # Set up signal handler for graceful shutdown
     try:
         signal.signal(signal.SIGINT, signal_handler)
     except ValueError:
         # Signal handler already set up, or not in main thread
         pass
-
+    
+    # Create directories
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize queue
+    queue = ProcessingQueue(queue_db)
+    
+    # Initialize pipeline
+    pipeline = ImagePipeline(
+        similarity_threshold=similarity_threshold,
+        memory_window_minutes=memory_window,
+        phash_threshold=phash_threshold,
+        enable_llm=not no_llm,
+        embedding_model=embedding_model,
+        verbose=verbose,
+    )
+    
     print("=" * 80)
-    print("🚀 Memoir - Capture + API Server")
+    print("🚀 Memoir - Intelligent Screenshot Memory System")
     print("=" * 80)
-    print(f"📷 Capture: {resolution_tier} tier, {interval}min interval")
-    print(f"🌐 Server: http://{server_host}:{server_port}")
     print(f"📁 Logs: {logs_dir.absolute()}")
+    print(f"📁 Staging: {staging_dir.absolute()}")
+    print(f"📁 Queue DB: {queue_db.absolute()}")
     print(f"🗄️  Vector store: {vector_store.count() if vector_store else 0} memories")
+    print(f"🌐 Server: http://{server_host}:{server_port}")
+    print(f"🐛 Debug mode: {debug}")
+    print(f"🤖 MLX VLM: {'Enabled' if not no_llm else 'Disabled'}")
+    
+    pending = queue.get_pending_count()
+    if pending > 0:
+        print(f"📥 Pending items in queue: {pending}")
+    
     print("=" * 80)
-    print("Press Ctrl+C to stop both processes\n")
-
-    # Start capture process in a separate thread
-    capture_thread = threading.Thread(
-        target=run_capture_process,
-        args=(
-            resolution_tier,
-            save_images,
-            logs_dir,
-            screenshots_dir,
-            model_name,
-            vector_store,
-            embedding_model,
-            interval,
-            run_once,
-            compare_tiers,
-            power_efficient,
-        ),
+    print("Press Ctrl+C to stop all processes\n")
+    
+    # Start window monitor thread
+    monitor_thread = threading.Thread(
+        target=run_window_monitor_process,
+        args=(staging_dir, queue, phash_threshold, 0.5, debug),
         daemon=True,
     )
-    capture_thread.start()
-
-    # Start server process in a separate thread
+    monitor_thread.start()
+    
+    # Start queue processor thread
+    processor_thread = threading.Thread(
+        target=run_queue_processor_process,
+        args=(queue, pipeline, output_dir, debug, 2.0),
+        daemon=True,
+    )
+    processor_thread.start()
+    
+    # Start server thread
     server_thread = threading.Thread(
         target=run_server_process,
         args=(logs_dir, vector_store, embedding_model, server_host, server_port),
         daemon=True,
     )
     server_thread.start()
-
+    
     try:
-        # Wait for both threads to complete with power-efficient polling
-        while running and (capture_thread.is_alive() or server_thread.is_alive()):
-            # Use longer sleep to reduce CPU wake-ups and power consumption
+        # Wait for all threads with power-efficient polling
+        while running and (
+            monitor_thread.is_alive()
+            or processor_thread.is_alive()
+            or server_thread.is_alive()
+        ):
             time.sleep(5)
-
-            # Check if capture process finished (for run_once mode)
-            if run_once and not capture_thread.is_alive():
-                print("📷 Capture process completed (run-once mode)")
-                break
-
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down both processes...")
+        print("\n🛑 Shutting down all processes...")
         running = False
-
+        
         # Wait for threads to finish
-        capture_thread.join(timeout=5)
+        monitor_thread.join(timeout=5)
+        processor_thread.join(timeout=10)
         server_thread.join(timeout=5)
-
-        if capture_thread.is_alive():
-            print("⚠️  Capture process did not stop gracefully")
+        
+        if monitor_thread.is_alive():
+            print("⚠️  Window monitor did not stop gracefully")
+        if processor_thread.is_alive():
+            print("⚠️  Queue processor did not stop gracefully")
         if server_thread.is_alive():
-            print("⚠️  Server process did not stop gracefully")
-
-    print("👋 Both processes stopped")
-
-
-async def run_both_async(
-    resolution_tier: str,
-    save_images: bool,
-    logs_dir: Path,
-    screenshots_dir: Path,
-    model_name: str,
-    vector_store=None,
-    embedding_model: str = "embeddinggemma",
-    interval: int = 1,
-    run_once: bool = False,
-    compare_tiers: bool = False,
-    server_host: str = "0.0.0.0",
-    server_port: int = 8000,
-):
-    """
-    Async version of run_both for use with asyncio.
-
-    Args:
-        resolution_tier: Resolution tier to use
-        save_images: Whether to save screenshot images
-        logs_dir: Path to logs directory
-        screenshots_dir: Path to screenshots directory
-        model_name: Ollama model name
-        vector_store: Optional VectorStore instance
-        embedding_model: Embedding model name
-        interval: Minutes between captures
-        run_once: Whether to run once and exit
-        compare_tiers: Whether to compare all resolution tiers
-        server_host: Host to bind server to
-        server_port: Port to bind server to
-    """
-    global running
-
-    print("=" * 80)
-    print("🚀 Memoir - Capture + API Server (Async)")
-    print("=" * 80)
-    print(f"📷 Capture: {resolution_tier} tier, {interval}min interval")
-    print(f"🌐 Server: http://{server_host}:{server_port}")
-    print(f"📁 Logs: {logs_dir.absolute()}")
-    print(f"🗄️  Vector store: {vector_store.count() if vector_store else 0} memories")
-    print("=" * 80)
-    print("Press Ctrl+C to stop both processes\n")
-
-    # Create tasks for both processes
-    capture_task = asyncio.create_task(
-        asyncio.to_thread(
-            run_capture_process,
-            resolution_tier,
-            save_images,
-            logs_dir,
-            screenshots_dir,
-            model_name,
-            vector_store,
-            embedding_model,
-            interval,
-            run_once,
-            compare_tiers,
-        )
-    )
-
-    server_task = asyncio.create_task(
-        asyncio.to_thread(
-            run_server_process,
-            logs_dir,
-            vector_store,
-            embedding_model,
-            server_host,
-            server_port,
-        )
-    )
-
-    try:
-        # Wait for both tasks to complete
-        await asyncio.gather(capture_task, server_task)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down both processes...")
-        running = False
-
-        # Cancel tasks
-        capture_task.cancel()
-        server_task.cancel()
-
-        # Wait for cancellation to complete
-        try:
-            await asyncio.gather(capture_task, server_task, return_exceptions=True)
-        except Exception:
-            pass
-
-    print("👋 Both processes stopped")
+            print("⚠️  Server did not stop gracefully")
+    
+    print("👋 All processes stopped")

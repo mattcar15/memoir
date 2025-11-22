@@ -378,3 +378,6 @@ def create_boxes_visualization(image, candidates, merged_boxes):
     }
 
 
+
+
+

@@ -137,6 +137,8 @@ testing/marked_snapshots/
 testing/test_images/
 .DS_Store
 testing/pipeline/out/
+old_logs/
+testing/benchmarking/macmon
 
 # Spyder project settings
 .spyderproject

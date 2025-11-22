@@ -19,8 +19,8 @@ import imagehash
 import numpy as np
 from paddleocr import PaddleOCR
 
-from ..config import RESOLUTION_TIERS
-from ..processor import process_with_ollama
+from ..config import RESOLUTION_TIERS, OCR_TEXT_THRESHOLD, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
+from ..mlx_processor import get_global_processor
 from ..embeddings import create_embedding
 
 
@@ -154,10 +154,10 @@ class ImagePipeline:
         similarity_threshold: float = 0.7,
         memory_window_minutes: int = 5,
         phash_threshold: int = 10,
-        ocr_text_threshold: int = 100,
+        ocr_text_threshold: Optional[int] = None,
         enable_llm: bool = True,
         embedding_model: str = "embeddinggemma",
-        ollama_model: str = "gemma3:4b",
+        mlx_model: Optional[str] = None,
         verbose: bool = False,
     ):
         """
@@ -167,19 +167,26 @@ class ImagePipeline:
             similarity_threshold: Cosine similarity threshold for memory consolidation (0-1)
             memory_window_minutes: Time window for active memories (minutes)
             phash_threshold: pHash difference threshold for duplicate detection
-            ocr_text_threshold: Minimum chars for OCR-only processing
+            ocr_text_threshold: Minimum chars for OCR-only processing (default: from config)
             enable_llm: Whether to use LLM for image-heavy content
             embedding_model: Model name for embeddings
-            ollama_model: Model name for Ollama LLM processing
+            mlx_model: MLX model name (default: from config)
         """
         self.similarity_threshold = similarity_threshold
         self.memory_window_minutes = memory_window_minutes
         self.phash_threshold = phash_threshold
-        self.ocr_text_threshold = ocr_text_threshold
+        self.ocr_text_threshold = ocr_text_threshold or OCR_TEXT_THRESHOLD
         self.enable_llm = enable_llm
         self.embedding_model = embedding_model
-        self.ollama_model = ollama_model
+        self.mlx_model = mlx_model or MLX_MODEL_NAME
         self.verbose = verbose
+        
+        # Get MLX processor (shared instance)
+        self.mlx_processor = get_global_processor(
+            model_name=self.mlx_model,
+            max_new_tokens=MLX_MAX_NEW_TOKENS,
+            verbose=verbose,
+        )
 
         # Initialize PaddleOCR
         print("🔧 Initializing PaddleOCR...")
@@ -428,7 +435,7 @@ class ImagePipeline:
         self, image: Image.Image
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """
-        Process image with LLM.
+        Process image with MLX VLM.
 
         Args:
             image: PIL Image to process
@@ -439,7 +446,10 @@ class ImagePipeline:
         if not self.enable_llm:
             return None, None
 
-        return process_with_ollama(image, self.ollama_model, power_efficient=False)
+        return self.mlx_processor.process_image(
+            image,
+            prompt="Summarize the user's current activity"
+        )
 
     def cosine_similarity(
         self, embedding1: List[float], embedding2: List[float]
