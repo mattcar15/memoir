@@ -7,7 +7,7 @@ import time
 import pyautogui
 from PIL import Image, ImageGrab
 
-from .config import RESOLUTION_TIERS
+from ..config import RESOLUTION_TIERS
 
 
 def get_cursor_position():

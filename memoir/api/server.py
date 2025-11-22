@@ -16,8 +16,8 @@ from .retrieval import (
     load_snapshot_data,
     get_oldest_snapshot_timestamp,
 )
-from .vector_store import VectorStore
-from .embeddings import create_embedding
+from ..storage.vector_store import VectorStore
+from ..storage.embeddings import create_embedding
 
 
 def create_app(

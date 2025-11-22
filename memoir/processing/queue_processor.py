@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Optional
 from PIL import Image
 
-from .queue import ProcessingQueue
-from .system_monitor import get_global_monitor
+from ..capture.queue import ProcessingQueue
+from ..core.system_monitor import get_global_monitor
 from .mlx_processor import get_global_processor
 from .pipeline.main import ImagePipeline
 

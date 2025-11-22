@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import (
+from ..config import (
     CAPTURE_STAGING_DIR,
     QUEUE_DB_PATH,
     DEBUG_MODE,
@@ -16,12 +16,12 @@ from .config import (
     WINDOW_POLL_INTERVAL,
     QUEUE_CHECK_INTERVAL,
 )
-from .window_monitor import WindowMonitor
-from .queue import ProcessingQueue
-from .queue_processor import QueueProcessor
-from .pipeline.main import ImagePipeline
-from .vector_store import VectorStore
-from .embeddings import warmup_embedding_model
+from ..capture.window_monitor import WindowMonitor
+from ..capture.queue import ProcessingQueue
+from ..processing.queue_processor import QueueProcessor
+from ..processing.pipeline.main import ImagePipeline
+from ..storage.vector_store import VectorStore
+from ..storage.embeddings import warmup_embedding_model
 from .system_monitor import get_global_monitor
 
 

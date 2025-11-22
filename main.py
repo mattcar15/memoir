@@ -9,8 +9,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from memoir.cli import run
-from memoir.runner import run_both
+from memoir.core.cli import run
+from memoir.core.runner import run_both
 
 
 def main():

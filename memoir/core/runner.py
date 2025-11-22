@@ -8,12 +8,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .window_monitor import WindowMonitor
-from .queue import ProcessingQueue
-from .queue_processor import QueueProcessor
-from .pipeline.main import ImagePipeline
-from .vector_store import VectorStore
-from .server import run_server
+from ..capture.window_monitor import WindowMonitor
+from ..capture.queue import ProcessingQueue
+from ..processing.queue_processor import QueueProcessor
+from ..processing.pipeline.main import ImagePipeline
+from ..storage.vector_store import VectorStore
+from ..api.server import run_server
 
 
 # Global flag for graceful shutdown

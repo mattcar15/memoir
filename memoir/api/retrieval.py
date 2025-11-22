@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dateutil import parser as date_parser
 
-from .vector_store import VectorStore
-from .embeddings import create_embedding
+from ..storage.vector_store import VectorStore
+from ..storage.embeddings import create_embedding
 
 
 def get_snapshots_in_range(

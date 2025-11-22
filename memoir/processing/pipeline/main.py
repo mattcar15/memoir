@@ -19,9 +19,9 @@ import imagehash
 import numpy as np
 from paddleocr import PaddleOCR
 
-from ..config import RESOLUTION_TIERS, OCR_TEXT_THRESHOLD, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
+from ...config import RESOLUTION_TIERS, OCR_TEXT_THRESHOLD, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
 from ..mlx_processor import get_global_processor
-from ..embeddings import create_embedding
+from ...storage.embeddings import create_embedding
 
 
 class Memory:
