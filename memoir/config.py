@@ -32,6 +32,3 @@ WINDOW_POLL_INTERVAL = 0.5  # seconds
 # System monitoring
 SYSTEM_MONITOR_CACHE_SECONDS = 30
 QUEUE_CHECK_INTERVAL = 2.0  # seconds
-
-# OCR threshold (chars)
-OCR_TEXT_THRESHOLD = 100

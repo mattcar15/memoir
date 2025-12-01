@@ -44,29 +44,29 @@ def setup_signal_handler():
 def run_capture_only(args):
     """
     Run window monitor to capture frames (without processing).
-    
+
     Args:
         args: Parsed command-line arguments
     """
     setup_signal_handler()
-    
+
     # Create directories
     staging_dir = Path(args.staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
-    
+
     queue_db = Path(args.queue_db)
     queue_db.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Initialize queue
     queue = ProcessingQueue(queue_db)
-    
+
     # Define capture callback
     def on_capture(frame_path, metadata):
         """Callback when a frame is captured."""
         print(f"✅ Captured: {frame_path.name}")
         queue.enqueue(frame_path, metadata)
         print(f"📥 Queued for processing (pending: {queue.get_pending_count()})")
-    
+
     # Initialize window monitor
     monitor = WindowMonitor(
         capture_dir=staging_dir,
@@ -75,7 +75,7 @@ def run_capture_only(args):
         poll_interval=args.poll_interval,
         debug=args.debug,
     )
-    
+
     print("=" * 80)
     print("📸 Window Monitor - Frame Capture")
     print("=" * 80)
@@ -85,16 +85,16 @@ def run_capture_only(args):
     print(f"pHash threshold: {args.phash_threshold}")
     print("=" * 80)
     print("Press Ctrl+C to stop\n")
-    
+
     # Start monitoring
     monitor.start()
-    
+
     try:
         while running:
             time.sleep(1)
     except KeyboardInterrupt:
         pass
-    
+
     monitor.stop()
     print("👋 Capture stopped")
 
@@ -102,27 +102,27 @@ def run_capture_only(args):
 def run_process_only(args):
     """
     Run queue processor to process captured frames.
-    
+
     Args:
         args: Parsed command-line arguments
     """
     setup_signal_handler()
-    
+
     # Create directories
     output_dir = Path(args.output_dir) if args.output_dir else None
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     queue_db = Path(args.queue_db)
-    
+
     if not queue_db.exists():
         print(f"❌ Queue database not found: {queue_db}")
         print("Run 'memoir capture' first to start capturing frames")
         sys.exit(1)
-    
+
     # Initialize queue
     queue = ProcessingQueue(queue_db)
-    
+
     # Initialize pipeline
     pipeline = ImagePipeline(
         similarity_threshold=args.similarity_threshold,
@@ -132,7 +132,7 @@ def run_process_only(args):
         embedding_model=args.embedding_model,
         verbose=args.verbose,
     )
-    
+
     # Initialize queue processor
     processor = QueueProcessor(
         queue=queue,
@@ -141,10 +141,10 @@ def run_process_only(args):
         debug=args.debug,
         check_interval=args.check_interval,
     )
-    
+
     # Initialize system monitor
     sys_monitor = get_global_monitor(verbose=args.verbose)
-    
+
     print("=" * 80)
     print("⚙️  Queue Processor - Background Processing")
     print("=" * 80)
@@ -152,29 +152,31 @@ def run_process_only(args):
     print(f"Output directory: {output_dir or 'None (debug mode off)'}")
     print(f"Debug mode: {args.debug}")
     print(f"LLM processing: {'Enabled' if not args.no_llm else 'Disabled'}")
-    
+
     pending = queue.get_pending_count()
     print(f"\nPending items: {pending}")
-    
+
     if pending > 0:
         sys_state = sys_monitor.get_system_state(use_cache=False)
         if sys_state:
-            print(f"System state: {sys_state['recommendation']} "
-                  f"(battery: {sys_state['battery_pct']}%, "
-                  f"{'charging' if sys_state['charging'] else 'on battery'})")
-    
+            print(
+                f"System state: {sys_state['recommendation']} "
+                f"(battery: {sys_state['battery_pct']}%, "
+                f"{'charging' if sys_state['charging'] else 'on battery'})"
+            )
+
     print("=" * 80)
     print("Press Ctrl+C to stop\n")
-    
+
     # Start processing
     processor.start()
-    
+
     try:
         while running:
             time.sleep(5)
     except KeyboardInterrupt:
         pass
-    
+
     processor.stop()
     processor.print_stats()
     print("👋 Processing stopped")
@@ -183,29 +185,29 @@ def run_process_only(args):
 def run_both(args):
     """
     Run both window monitor and queue processor.
-    
+
     Args:
         args: Parsed command-line arguments
     """
     from .runner import run_both as runner_run_both
-    
+
     # Set up directories
     logs_dir = Path(args.logs_dir)
     staging_dir = Path(args.staging_dir)
     output_dir = Path(args.output_dir) if args.output_dir else None
-    
+
     logs_dir.mkdir(parents=True, exist_ok=True)
     staging_dir.mkdir(parents=True, exist_ok=True)
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Initialize vector store if enabled
     vector_store = None
     if not args.disable_vectorization:
         vector_store = VectorStore(logs_dir / "vector_db")
         if not args.no_warmup:
             warmup_embedding_model(args.embedding_model)
-    
+
     # Run both processes
     runner_run_both(
         logs_dir=logs_dir,
@@ -220,34 +222,34 @@ def run_both(args):
         debug=args.debug,
         verbose=args.verbose,
         no_llm=args.no_llm,
-        server_host=args.host if hasattr(args, 'host') else "0.0.0.0",
-        server_port=args.port if hasattr(args, 'port') else 8000,
+        server_host=args.host if hasattr(args, "host") else "0.0.0.0",
+        server_port=args.port if hasattr(args, "port") else 8000,
     )
 
 
 def run_search(args):
     """
     Search memories using semantic search.
-    
+
     Args:
         args: Parsed command-line arguments
     """
     logs_dir = Path(args.logs_dir)
     vector_store = VectorStore(logs_dir / "vector_db")
-    
+
     if vector_store.count() == 0:
         print("No memories found in vector store")
         return
-    
+
     print(f"🔍 Searching for: {args.query}")
     print(f"Total memories: {vector_store.count()}\n")
-    
+
     results = vector_store.search(args.query, n_results=args.results)
-    
+
     if not results:
         print("No results found")
         return
-    
+
     print(f"Found {len(results)} results:\n")
     for i, result in enumerate(results, 1):
         print(f"{i}. [{result['timestamp']}]")
@@ -260,14 +262,13 @@ def run():
     parser = argparse.ArgumentParser(
         description="Memoir - Screenshot Memory System with MLX-based Processing"
     )
-    
+
     # Add subcommands
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-    
+
     # Capture command - window monitoring only
     capture_parser = subparsers.add_parser(
-        "capture",
-        help="Run window monitor to capture frames (queues for processing)"
+        "capture", help="Run window monitor to capture frames (queues for processing)"
     )
     capture_parser.add_argument(
         "--staging-dir",
@@ -298,11 +299,10 @@ def run():
         action="store_true",
         help="Enable debug mode (more verbose output)",
     )
-    
+
     # Process command - queue processing only
     process_parser = subparsers.add_parser(
-        "process",
-        help="Run queue processor to process captured frames"
+        "process", help="Run queue processor to process captured frames"
     )
     process_parser.add_argument(
         "--queue-db",
@@ -361,11 +361,10 @@ def run():
         action="store_true",
         help="Show detailed processing information",
     )
-    
+
     # Both command - run everything (default)
     both_parser = subparsers.add_parser(
-        "both",
-        help="Run both capture and processing (default)"
+        "both", help="Run both capture and processing (default)"
     )
     both_parser.add_argument(
         "--logs-dir",
@@ -452,11 +451,10 @@ def run():
         default=8000,
         help="Server port (default: 8000)",
     )
-    
+
     # Search command
     search_parser = subparsers.add_parser(
-        "search",
-        help="Search memories using semantic search"
+        "search", help="Search memories using semantic search"
     )
     search_parser.add_argument(
         "query",
@@ -475,10 +473,10 @@ def run():
         default=5,
         help="Number of results (default: 5)",
     )
-    
+
     # Parse arguments
     args = parser.parse_args()
-    
+
     # Default to 'both' if no command specified
     if not args.command:
         args.command = "both"
@@ -498,7 +496,7 @@ def run():
         args.verbose = False
         args.host = "0.0.0.0"
         args.port = 8000
-    
+
     # Route to appropriate handler
     if args.command == "capture":
         run_capture_only(args)

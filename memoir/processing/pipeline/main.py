@@ -4,9 +4,8 @@ Image processing pipeline for screenshot analysis and memory consolidation.
 This module implements the complete pipeline for processing screenshots:
 1. pHash-based deduplication (checks last 5 minutes)
 2. Image downscaling for efficient processing
-3. OCR text extraction using PaddleOCR
-4. LLM processing fallback for image-heavy content
-5. Memory consolidation using cosine similarity
+3. VLM (MLX) processing for image understanding and text extraction
+4. Memory consolidation using cosine similarity
 """
 
 import time
@@ -17,9 +16,8 @@ from typing import Optional, Dict, Any, List, Tuple
 from PIL import Image
 import imagehash
 import numpy as np
-from paddleocr import PaddleOCR
 
-from ...config import RESOLUTION_TIERS, OCR_TEXT_THRESHOLD, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
+from ...config import RESOLUTION_TIERS, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
 from ..mlx_processor import get_global_processor
 from ...storage.embeddings import create_embedding
 
@@ -154,8 +152,6 @@ class ImagePipeline:
         similarity_threshold: float = 0.7,
         memory_window_minutes: int = 5,
         phash_threshold: int = 10,
-        ocr_text_threshold: Optional[int] = None,
-        enable_llm: bool = True,
         embedding_model: str = "embeddinggemma",
         mlx_model: Optional[str] = None,
         verbose: bool = False,
@@ -167,16 +163,13 @@ class ImagePipeline:
             similarity_threshold: Cosine similarity threshold for memory consolidation (0-1)
             memory_window_minutes: Time window for active memories (minutes)
             phash_threshold: pHash difference threshold for duplicate detection
-            ocr_text_threshold: Minimum chars for OCR-only processing (default: from config)
-            enable_llm: Whether to use LLM for image-heavy content
             embedding_model: Model name for embeddings
-            mlx_model: MLX model name (default: from config)
+            mlx_model: MLX VLM model name (default: from config)
+            verbose: If True, print detailed processing information
         """
         self.similarity_threshold = similarity_threshold
         self.memory_window_minutes = memory_window_minutes
         self.phash_threshold = phash_threshold
-        self.ocr_text_threshold = ocr_text_threshold or OCR_TEXT_THRESHOLD
-        self.enable_llm = enable_llm
         self.embedding_model = embedding_model
         self.mlx_model = mlx_model or MLX_MODEL_NAME
         self.verbose = verbose
@@ -188,11 +181,6 @@ class ImagePipeline:
             verbose=verbose,
         )
 
-        # Initialize PaddleOCR
-        print("🔧 Initializing PaddleOCR...")
-        self.ocr = PaddleOCR(lang="en", use_angle_cls=True)
-        print("✅ PaddleOCR initialized")
-
         # Memory tracking
         self.memories: List[Memory] = []
         self.recent_hashes: List[Tuple[datetime, str]] = []  # (timestamp, phash)
@@ -201,8 +189,7 @@ class ImagePipeline:
         self.stats = {
             "total_processed": 0,
             "duplicates_skipped": 0,
-            "ocr_only": 0,
-            "llm_processed": 0,
+            "vlm_processed": 0,
             "memories_created": 0,
             "images_consolidated": 0,
         }
@@ -277,165 +264,11 @@ class ImagePipeline:
         # Resize image
         return image.resize((new_width, new_height), resample=Image.LANCZOS)
 
-    def extract_text_ocr(self, image: Image.Image) -> Tuple[str, Dict[str, Any]]:
-        """
-        Extract text from image using PaddleOCR.
-
-        Args:
-            image: PIL Image to extract text from
-
-        Returns:
-            Tuple of (extracted text, stats dict)
-        """
-        start_time = time.time()
-
-        try:
-            # PaddleOCR expects RGB images without alpha channel
-            if image.mode != "RGB":
-                print(f"  🔄 Converting image mode from {image.mode} to RGB for OCR")
-                image = image.convert("RGB")
-
-            # Convert PIL Image to numpy array for PaddleOCR (RGB)
-            img_array = np.array(image)
-            # print(
-            #     f"  🔍 Image array shape: {img_array.shape}, dtype: {img_array.dtype}"
-            # )
-
-            # Run OCR
-            print("  🔍 Running PaddleOCR...")
-            result = self.ocr.ocr(img_array)
-            # print(f"  🔍 Raw OCR result type: {type(result)}")
-            # print(f"  🔍 Raw OCR result: {result}")
-
-            # Extract text from result
-            text_lines = []
-
-            # PaddleOCR returns a list with one element per page/image
-            # Each element is a list of detected text regions or None if nothing found
-            if result is None:
-                print("  ⚠️  OCR returned None (no text detected)")
-            elif isinstance(result, list):
-                print(f"  🔍 Result is list with length: {len(result)}")
-                if len(result) > 0:
-                    page_result = result[0]
-                    print(f"  🔍 First page result type: {type(page_result)}")
-
-                    # PaddleOCR >=3 returns OCRResult objects; convert to dict if possible
-                    page_dict = None
-                    if page_result is None:
-                        print("  ⚠️  No text detected in image")
-                    elif hasattr(page_result, "dict"):
-                        try:
-                            page_dict = page_result.dict()
-                            print(
-                                f"  🔍 First page dict keys: {list(page_dict.keys())}"
-                            )
-                        except Exception as convert_err:
-                            print(
-                                f"  ⚠️  Failed to convert OCRResult to dict: {convert_err}"
-                            )
-                    elif isinstance(page_result, dict):
-                        page_dict = page_result
-                        print(f"  🔍 First page dict keys: {list(page_dict.keys())}")
-
-                    if page_dict is not None:
-                        rec_texts = page_dict.get("rec_texts") or []
-                        rec_scores = page_dict.get("rec_scores") or []
-                        print(
-                            f"  🔍 Found {len(rec_texts)} recognized entries in rec_texts"
-                        )
-                        for idx, text in enumerate(rec_texts):
-                            score = (
-                                rec_scores[idx] if idx < len(rec_scores) else "unknown"
-                            )
-                            print(
-                                f"    ✅ rec_texts[{idx}]: '{text}' (confidence: {score})"
-                            )
-                            if text:
-                                text_lines.append(text)
-
-                        # Fallback for legacy structures within dicts
-                        if not text_lines:
-                            legacy_lines = page_dict.get("rec_result") or []
-                            if legacy_lines:
-                                print(
-                                    f"  🔍 Fallback to rec_result with {len(legacy_lines)} entries"
-                                )
-                                for idx, line in enumerate(legacy_lines):
-                                    print(
-                                        f"    🔍 Legacy line {idx}: type={type(line)}, value={line}"
-                                    )
-                                    if (
-                                        isinstance(line, (list, tuple))
-                                        and len(line) >= 2
-                                    ):
-                                        text = line[0]
-                                        score = line[1]
-                                        print(
-                                            f"      ✅ Legacy extracted: '{text}' (confidence: {score})"
-                                        )
-                                        if text:
-                                            text_lines.append(text)
-
-                    # Legacy PaddleOCR (<3.0) returns list of lines
-                    if not text_lines and isinstance(page_result, list):
-                        print(
-                            f"  🔍 Processing {len(page_result)} detected text regions (legacy format)"
-                        )
-                        for idx, line in enumerate(page_result):
-                            print(f"    🔍 Line {idx}: type={type(line)}, value={line}")
-
-                            # Each line is [bbox, (text, confidence)]
-                            if isinstance(line, (list, tuple)) and len(line) >= 2:
-                                text_info = line[1]
-                                if (
-                                    isinstance(text_info, (list, tuple))
-                                    and len(text_info) >= 1
-                                ):
-                                    text = text_info[0]
-                                    confidence = (
-                                        text_info[1] if len(text_info) > 1 else 1.0
-                                    )
-                                    print(
-                                        f"      ✅ Extracted: '{text}' (confidence: {confidence})"
-                                    )
-                                    if text:
-                                        text_lines.append(text)
-                                elif isinstance(text_info, str):
-                                    print(f"      ✅ Extracted: '{text_info}'")
-                                    if text_info:
-                                        text_lines.append(text_info)
-                            else:
-                                print("      ⚠️  Unexpected line format")
-
-            extracted_text = " ".join(text_lines)
-            processing_time = time.time() - start_time
-
-            stats = {
-                "ocr_processing_time_seconds": round(processing_time, 3),
-                "text_length_chars": len(extracted_text),
-                "text_lines_found": len(text_lines),
-            }
-
-            return extracted_text, stats
-
-        except Exception as e:
-            print(f"❌ OCR extraction failed: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return "", {
-                "ocr_processing_time_seconds": time.time() - start_time,
-                "text_length_chars": 0,
-                "text_lines_found": 0,
-                "error": str(e),
-            }
-
-    def process_with_llm(
+    def process_with_vlm(
         self, image: Image.Image
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """
-        Process image with MLX VLM.
+        Process image with MLX VLM model.
 
         Args:
             image: PIL Image to process
@@ -443,12 +276,9 @@ class ImagePipeline:
         Returns:
             Tuple of (summary text, stats dict)
         """
-        if not self.enable_llm:
-            return None, None
-
         return self.mlx_processor.process_image(
             image,
-            prompt="Summarize the user's current activity"
+            prompt="Explain the key pieces of the image that explain what the user is doing."
         )
 
     def cosine_similarity(
@@ -566,48 +396,14 @@ class ImagePipeline:
         downscaled = self.downscale_image(image, tier="balanced")
         print(f"✅ Downscaled to {downscaled.size[0]}x{downscaled.size[1]}")
 
-        # Step 3: Extract text using OCR
-        print("📝 Extracting text with OCR...")
-        extracted_text, ocr_stats = self.extract_text_ocr(downscaled)
-        if self.verbose:
-            print(
-                f"✅ Extracted {ocr_stats['text_length_chars']} chars from {ocr_stats['text_lines_found']} lines"
-            )
-            if extracted_text:
-                print(f"   🖨️ OCR Text: {extracted_text}")
-        else:
-            print(
-                f"✅ Extracted {ocr_stats['text_length_chars']} chars from {ocr_stats['text_lines_found']} lines"
-            )
-
-        # Step 4: Decide on processing method
-        summary = None
-        llm_stats = None
-        processing_method = None
-
-        if extracted_text and len(extracted_text) >= self.ocr_text_threshold:
-            # Sufficient text - use OCR result
-            print(f"✅ Using OCR text (>= {self.ocr_text_threshold} chars)")
-            summary = f"User is viewing/working with: {extracted_text}"
-            processing_method = "ocr"
-            self.stats["ocr_only"] += 1
-        else:
-            # Insufficient text - use LLM if enabled
-            if self.enable_llm:
-                print(f"🤖 Text too short ({len(extracted_text)} chars), using LLM...")
-                summary, llm_stats = self.process_with_llm(downscaled)
-                processing_method = "llm"
-                self.stats["llm_processed"] += 1
-            else:
-                print(
-                    f"⚠️  Text too short ({len(extracted_text)} chars), LLM disabled - using OCR anyway"
-                )
-                summary = f"User is viewing: {extracted_text if extracted_text else 'Unknown content'}"
-                processing_method = "ocr_fallback"
-                self.stats["ocr_only"] += 1
+        # Step 3: Process with VLM model
+        print("🤖 Processing with VLM model...")
+        summary, vlm_stats = self.process_with_vlm(downscaled)
+        processing_method = "vlm"
+        self.stats["vlm_processed"] += 1
 
         if not summary:
-            print("❌ Failed to generate summary")
+            print("❌ Failed to generate summary from VLM")
             return None
 
         if self.verbose:
@@ -648,9 +444,9 @@ class ImagePipeline:
                 current_time,
                 image_path=image_path,
                 processing_method=processing_method,
-                extracted_text=extracted_text,
-                ocr_stats=ocr_stats,
-                llm_stats=llm_stats,
+                extracted_text=None,
+                ocr_stats=None,
+                llm_stats=vlm_stats,
             )
             memory_id = matching_memory.memory_id
             self.stats["images_consolidated"] += 1
@@ -673,9 +469,9 @@ class ImagePipeline:
                 embedding,
                 image_path,
                 processing_method=processing_method,
-                extracted_text=extracted_text,
-                ocr_stats=ocr_stats,
-                llm_stats=llm_stats,
+                extracted_text=None,
+                ocr_stats=None,
+                llm_stats=vlm_stats,
             )
             self.memories.append(new_memory)
             is_new_memory = True
@@ -689,12 +485,10 @@ class ImagePipeline:
             "is_new_memory": is_new_memory,
             "processing_method": processing_method,
             "summary": summary,
-            "extracted_text": extracted_text,
             "image_path": str(image_path) if image_path else None,
             "timestamp": current_time.isoformat(),
             "total_processing_time_seconds": round(total_time, 3),
-            "ocr_stats": ocr_stats,
-            "llm_stats": llm_stats,
+            "vlm_stats": vlm_stats,
         }
 
         print(f"✅ Processing complete in {total_time:.2f}s")
@@ -731,8 +525,7 @@ class ImagePipeline:
         print("=" * 80)
         print(f"Total images processed: {stats['total_processed']}")
         print(f"Duplicates skipped: {stats['duplicates_skipped']}")
-        print(f"Images with sufficient OCR: {stats['ocr_only']}")
-        print(f"Images needing LLM: {stats['llm_processed']}")
+        print(f"Images processed with VLM: {stats['vlm_processed']}")
         print(f"\nMemories created: {stats['memories_created']}")
         print(
             f"Images consolidated into existing memories: {stats['images_consolidated']}"

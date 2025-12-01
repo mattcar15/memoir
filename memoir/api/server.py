@@ -279,3 +279,78 @@ def run_server(
     print(f"📖 API docs available at: http://{host}:{port}/docs")
 
     uvicorn.run(app, host=host, port=port)
+
+
+def main():
+    """CLI entry point for running the server standalone."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run the Memoir API server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python -m memoir.api.server
+    python -m memoir.api.server --logs-dir testing_logs
+    python -m memoir.api.server --logs-dir testing_logs --port 8080
+        """,
+    )
+
+    parser.add_argument(
+        "--logs-dir",
+        "-l",
+        type=Path,
+        default=Path("logs"),
+        help="Logs directory containing JSON snapshots (default: logs)",
+    )
+
+    parser.add_argument(
+        "--vector-db",
+        "-v",
+        type=Path,
+        default=None,
+        help="Vector database directory (default: {logs-dir}/vector_db)",
+    )
+
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind to (default: 0.0.0.0)",
+    )
+
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8000,
+        help="Port to bind to (default: 8000)",
+    )
+
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="embeddinggemma",
+        help="Embedding model name (default: embeddinggemma)",
+    )
+
+    args = parser.parse_args()
+
+    # Determine vector store path
+    vector_db_path = args.vector_db or (args.logs_dir / "vector_db")
+
+    # Initialize vector store
+    vector_store = VectorStore(persist_directory=str(vector_db_path))
+
+    # Run server
+    run_server(
+        host=args.host,
+        port=args.port,
+        logs_dir=args.logs_dir,
+        vector_store=vector_store,
+        embedding_model=args.embedding_model,
+    )
+
+
+if __name__ == "__main__":
+    main()
