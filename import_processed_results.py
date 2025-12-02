@@ -80,6 +80,10 @@ def create_snapshot_json(
     summary: str,
     screenshot_path: Optional[Path],
     stats: Optional[Dict[str, Any]] = None,
+    title: Optional[str] = None,
+    bullets: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+    entities: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Create a snapshot JSON structure compatible with the memoir server.
@@ -90,6 +94,10 @@ def create_snapshot_json(
         summary: VLM-generated summary
         screenshot_path: Path to screenshot file
         stats: Optional processing stats
+        title: Short human-friendly title
+        bullets: List of key details/bullets
+        tags: List of keyword tags
+        entities: List of entities (people, projects, products)
 
     Returns:
         Dictionary ready to be saved as JSON
@@ -97,7 +105,11 @@ def create_snapshot_json(
     return {
         "memory_id": memory_id,
         "timestamp": timestamp.isoformat(),
+        "title": title or "Untitled",
         "summary": summary,
+        "bullets": bullets or [],
+        "tags": tags or [],
+        "entities": entities or [],
         "screenshot_path": str(screenshot_path) if screenshot_path else None,
         "stats": stats or {},
         "created_at": datetime.now().isoformat(),
@@ -156,6 +168,12 @@ def import_from_results_file(
             vlm_stats = result.get("vlm_stats", {})
             result_timestamp = result.get("timestamp")
 
+            # Extract new structured fields
+            title = result.get("title")
+            bullets = result.get("bullets", [])
+            tags = result.get("tags", [])
+            entities = result.get("entities", [])
+
             if not summary or not source_file:
                 skipped += 1
                 continue
@@ -207,6 +225,9 @@ def import_from_results_file(
                 "timestamp": timestamp.isoformat(),
                 "source_file": str(source_path),
                 "screenshot_path": str(screenshot_dest) if screenshot_dest else None,
+                "title": title,
+                "tags": tags,
+                "entities": entities,
             }
 
             if vlm_stats:
@@ -226,6 +247,10 @@ def import_from_results_file(
                 summary=summary,
                 screenshot_path=screenshot_dest,
                 stats=vlm_stats,
+                title=title,
+                bullets=bullets,
+                tags=tags,
+                entities=entities,
             )
 
             with open(json_file, "w") as f:
@@ -341,15 +366,29 @@ def import_with_reprocessing(
             image = Image.open(image_path)
             image.load()
 
-            # Process with VLM
-            summary, vlm_stats = pipeline.process_with_vlm(
+            # Process with VLM (returns structured data)
+            structured_data, vlm_stats = pipeline.process_with_vlm(
                 pipeline.downscale_image(image, tier="balanced")
             )
 
             image.close()
 
+            if not structured_data:
+                tqdm.write(
+                    f"⚠️  Failed to generate structured output for {image_path.name}"
+                )
+                errors += 1
+                continue
+
+            # Extract fields from structured data
+            title = structured_data.get("title", "Untitled")
+            summary = structured_data.get("summary", "")
+            bullets = structured_data.get("bullets", [])
+            tags = structured_data.get("tags", [])
+            entities = structured_data.get("entities", [])
+
             if not summary:
-                tqdm.write(f"⚠️  Failed to generate summary for {image_path.name}")
+                tqdm.write(f"⚠️  No summary in structured output for {image_path.name}")
                 errors += 1
                 continue
 
@@ -373,6 +412,9 @@ def import_with_reprocessing(
                 "timestamp": timestamp.isoformat(),
                 "source_file": str(image_path),
                 "screenshot_path": str(screenshot_dest) if screenshot_dest else None,
+                "title": title,
+                "tags": tags,
+                "entities": entities,
             }
 
             if vlm_stats:
@@ -392,6 +434,10 @@ def import_with_reprocessing(
                 summary=summary,
                 screenshot_path=screenshot_dest,
                 stats=vlm_stats,
+                title=title,
+                bullets=bullets,
+                tags=tags,
+                entities=entities,
             )
 
             with open(json_file, "w") as f:
@@ -506,9 +552,11 @@ Examples:
     )
 
     parser.add_argument(
-        "--reset-vector-store",
+        "--reset",
+        "--reset-vector-store",  # Keep old flag as alias for backwards compatibility
         action="store_true",
-        help="Clear the vector store before importing",
+        dest="reset",
+        help="Clear the vector store AND delete existing JSON snapshot files before importing",
     )
 
     args = parser.parse_args()
@@ -529,9 +577,18 @@ Examples:
     print("🔧 Initializing vector store...")
     vector_store = VectorStore(persist_directory=str(vector_db_path))
 
-    if args.reset_vector_store:
+    if args.reset:
         print("⚠️  Resetting vector store...")
         vector_store.reset()
+        print("✅ Vector store reset successfully")
+
+        # Also delete existing JSON snapshot files
+        existing_jsons = list(args.logs_dir.glob("*.json"))
+        if existing_jsons:
+            print(f"🗑️  Deleting {len(existing_jsons)} existing JSON snapshot files...")
+            for json_file in existing_jsons:
+                json_file.unlink()
+            print("✅ JSON files deleted")
 
     print(f"   Current entries: {vector_store.count()}")
     print()

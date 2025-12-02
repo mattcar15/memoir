@@ -17,8 +17,8 @@ from PIL import Image
 import imagehash
 import numpy as np
 
-from ...config import RESOLUTION_TIERS, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS
-from ..mlx_processor import get_global_processor
+from ...config import RESOLUTION_TIERS, MLX_MODEL_NAME, MLX_MAX_NEW_TOKENS, SCREENSHOT_PROMPT_PATH
+from ..mlx_processor import get_global_processor, load_prompt
 from ...storage.embeddings import create_embedding
 
 
@@ -36,6 +36,10 @@ class Memory:
         extracted_text: Optional[str] = None,
         ocr_stats: Optional[Dict[str, Any]] = None,
         llm_stats: Optional[Dict[str, Any]] = None,
+        title: Optional[str] = None,
+        bullets: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        entities: Optional[List[str]] = None,
     ):
         self.memory_id = memory_id
         self.created_at = timestamp
@@ -55,6 +59,10 @@ class Memory:
             extracted_text=extracted_text,
             ocr_stats=ocr_stats,
             llm_stats=llm_stats,
+            title=title,
+            bullets=bullets,
+            tags=tags,
+            entities=entities,
         )
 
     def _compute_average_embedding(self) -> List[float]:
@@ -85,6 +93,10 @@ class Memory:
         extracted_text: Optional[str] = None,
         ocr_stats: Optional[Dict[str, Any]] = None,
         llm_stats: Optional[Dict[str, Any]] = None,
+        title: Optional[str] = None,
+        bullets: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        entities: Optional[List[str]] = None,
     ):
         """Add a new image/summary to this memory."""
         self.summaries.append(summary)
@@ -106,6 +118,10 @@ class Memory:
             "extracted_text": extracted_text,
             "ocr_stats": ocr_stats,
             "llm_stats": llm_stats,
+            "title": title,
+            "bullets": bullets or [],
+            "tags": tags or [],
+            "entities": entities or [],
         }
         self.entries.append(entry)
 
@@ -131,6 +147,10 @@ class Memory:
             "entries": [
                 {
                     "summary": entry["summary"],
+                    "title": entry.get("title"),
+                    "bullets": entry.get("bullets", []),
+                    "tags": entry.get("tags", []),
+                    "entities": entry.get("entities", []),
                     "timestamp": (
                         entry["timestamp"].isoformat()
                         if entry.get("timestamp")
@@ -266,20 +286,25 @@ class ImagePipeline:
 
     def process_with_vlm(
         self, image: Image.Image
-    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
-        Process image with MLX VLM model.
+        Process image with MLX VLM model using structured prompt.
 
         Args:
             image: PIL Image to process
 
         Returns:
-            Tuple of (summary text, stats dict)
+            Tuple of (structured_data dict with title/summary/bullets/tags/entities, stats dict)
         """
-        return self.mlx_processor.process_image(
-            image,
-            prompt="Explain the key pieces of the image that explain what the user is doing."
-        )
+        # Load prompt from file
+        try:
+            prompt = load_prompt(SCREENSHOT_PROMPT_PATH)
+        except FileNotFoundError:
+            # Fallback to basic prompt if file not found
+            print(f"⚠️  Prompt file not found: {SCREENSHOT_PROMPT_PATH}, using fallback")
+            prompt = "Describe this screenshot as a JSON object with: title, summary, bullets, tags, entities"
+        
+        return self.mlx_processor.process_image_structured(image, prompt)
 
     def cosine_similarity(
         self, embedding1: List[float], embedding2: List[float]
@@ -398,17 +423,32 @@ class ImagePipeline:
 
         # Step 3: Process with VLM model
         print("🤖 Processing with VLM model...")
-        summary, vlm_stats = self.process_with_vlm(downscaled)
+        structured_data, vlm_stats = self.process_with_vlm(downscaled)
         processing_method = "vlm"
         self.stats["vlm_processed"] += 1
 
+        if not structured_data:
+            print("❌ Failed to generate structured output from VLM")
+            return None
+
+        # Extract fields from structured data
+        title = structured_data.get("title", "Untitled")
+        summary = structured_data.get("summary", "")
+        bullets = structured_data.get("bullets", [])
+        tags = structured_data.get("tags", [])
+        entities = structured_data.get("entities", [])
+
         if not summary:
-            print("❌ Failed to generate summary from VLM")
+            print("❌ No summary in structured output")
             return None
 
         if self.verbose:
+            print(f"📝 Title: {title}")
             print(f"📝 Summary (full): {summary}")
+            print(f"📝 Tags: {tags}")
+            print(f"📝 Entities: {entities}")
         else:
+            print(f"📝 Title: {title}")
             print(f"📝 Summary: {summary[:100]}{'...' if len(summary) > 100 else ''}")
 
         # Step 5: Create embedding
@@ -447,6 +487,10 @@ class ImagePipeline:
                 extracted_text=None,
                 ocr_stats=None,
                 llm_stats=vlm_stats,
+                title=title,
+                bullets=bullets,
+                tags=tags,
+                entities=entities,
             )
             memory_id = matching_memory.memory_id
             self.stats["images_consolidated"] += 1
@@ -472,6 +516,10 @@ class ImagePipeline:
                 extracted_text=None,
                 ocr_stats=None,
                 llm_stats=vlm_stats,
+                title=title,
+                bullets=bullets,
+                tags=tags,
+                entities=entities,
             )
             self.memories.append(new_memory)
             is_new_memory = True
@@ -484,7 +532,11 @@ class ImagePipeline:
             "memory_id": memory_id,
             "is_new_memory": is_new_memory,
             "processing_method": processing_method,
+            "title": title,
             "summary": summary,
+            "bullets": bullets,
+            "tags": tags,
+            "entities": entities,
             "image_path": str(image_path) if image_path else None,
             "timestamp": current_time.isoformat(),
             "total_processing_time_seconds": round(total_time, 3),

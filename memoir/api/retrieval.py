@@ -52,7 +52,11 @@ def get_snapshots_in_range(
                         "file_path": json_file,
                         "memory_id": data.get("memory_id", json_file.stem),
                         "timestamp": data.get("timestamp"),
+                        "title": data.get("title"),
                         "summary": data.get("summary"),
+                        "bullets": data.get("bullets", []),
+                        "tags": data.get("tags", []),
+                        "entities": data.get("entities", []),
                         "stats": data.get("stats", {}),
                         "screenshot_path": data.get("screenshot_path"),
                         "raw_data": data,
@@ -179,7 +183,11 @@ def search_snapshots(
                     enriched_result = {
                         "memory_id": memory_id,
                         "timestamp": data.get("timestamp"),
+                        "title": data.get("title"),
                         "summary": data.get("summary"),
+                        "bullets": data.get("bullets", []),
+                        "tags": data.get("tags", []),
+                        "entities": data.get("entities", []),
                         "stats": data.get("stats", {}),
                         "screenshot_path": data.get("screenshot_path"),
                         "similarity": 1 - (result["distance"] / 2),
@@ -193,7 +201,11 @@ def search_snapshots(
                         {
                             "memory_id": memory_id,
                             "timestamp": result["metadata"].get("timestamp"),
+                            "title": result["metadata"].get("title"),
                             "summary": result["summary"],
+                            "bullets": [],
+                            "tags": result["metadata"].get("tags", []),
+                            "entities": result["metadata"].get("entities", []),
                             "stats": result["metadata"].get("stats", {}),
                             "screenshot_path": result["metadata"].get(
                                 "screenshot_path"
@@ -208,7 +220,11 @@ def search_snapshots(
                     {
                         "memory_id": memory_id,
                         "timestamp": result["metadata"].get("timestamp"),
+                        "title": result["metadata"].get("title"),
                         "summary": result["summary"],
+                        "bullets": [],
+                        "tags": result["metadata"].get("tags", []),
+                        "entities": result["metadata"].get("entities", []),
                         "stats": result["metadata"].get("stats", {}),
                         "screenshot_path": result["metadata"].get("screenshot_path"),
                         "similarity": 1 - (result["distance"] / 2),
@@ -223,7 +239,11 @@ def search_snapshots(
         {
             "memory_id": result["id"],
             "timestamp": result["metadata"].get("timestamp"),
+            "title": result["metadata"].get("title"),
             "summary": result["summary"],
+            "bullets": [],
+            "tags": result["metadata"].get("tags", []),
+            "entities": result["metadata"].get("entities", []),
             "stats": result["metadata"].get("stats", {}),
             "screenshot_path": result["metadata"].get("screenshot_path"),
             "similarity": 1 - result["distance"],
@@ -249,8 +269,12 @@ def load_snapshot_data(
     """
     response = {
         "timestamp": snapshot["timestamp"],
-        "summary": snapshot["summary"],
         "memory_id": snapshot["memory_id"],
+        "title": snapshot.get("title"),
+        "summary": snapshot["summary"],
+        "bullets": snapshot.get("bullets", []),
+        "tags": snapshot.get("tags", []),
+        "entities": snapshot.get("entities", []),
     }
 
     if include_stats and "stats" in snapshot:
@@ -294,7 +318,11 @@ def get_snapshot_by_id(
         snapshot = {
             "memory_id": memory_id,
             "timestamp": data.get("timestamp"),
+            "title": data.get("title"),
             "summary": data.get("summary"),
+            "bullets": data.get("bullets", []),
+            "tags": data.get("tags", []),
+            "entities": data.get("entities", []),
             "stats": data.get("stats", {}),
             "screenshot_path": data.get("screenshot_path"),
             "raw_data": data,

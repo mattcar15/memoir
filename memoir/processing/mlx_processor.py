@@ -5,7 +5,10 @@ This module uses MLX VLM (Qwen3-VL-2B-Instruct-MLX-8bit) for processing
 image-heavy content when OCR text is insufficient.
 """
 
+import json
+import re
 import time
+from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from PIL import Image, ImageOps
 
@@ -13,6 +16,94 @@ import mlx.core as mx
 from mlx_vlm import load, generate
 from mlx_vlm.prompt_utils import apply_chat_template
 from mlx_vlm.utils import load_config
+
+
+def load_prompt(prompt_path: Path) -> str:
+    """
+    Load a prompt from a file.
+    
+    Args:
+        prompt_path: Path to the prompt file
+        
+    Returns:
+        Prompt text content
+        
+    Raises:
+        FileNotFoundError: If prompt file doesn't exist
+    """
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {prompt_path}")
+    
+    return prompt_path.read_text(encoding="utf-8").strip()
+
+
+def parse_vlm_json_response(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract and parse JSON from VLM output.
+    
+    The VLM may return JSON wrapped in markdown code blocks or with
+    extra text before/after. This function extracts the JSON object.
+    
+    Args:
+        text: Raw VLM output text
+        
+    Returns:
+        Parsed JSON dictionary or None if parsing fails
+    """
+    if not text:
+        return None
+    
+    # Try direct JSON parse first
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to extract JSON from markdown code blocks
+    # Pattern: ```json ... ``` or ``` ... ```
+    code_block_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    matches = re.findall(code_block_pattern, text)
+    
+    for match in matches:
+        try:
+            return json.loads(match.strip())
+        except json.JSONDecodeError:
+            continue
+    
+    # Try to find JSON object directly in text (between { and })
+    # Find the first { and last } to extract potential JSON
+    start_idx = text.find("{")
+    end_idx = text.rfind("}")
+    
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        potential_json = text[start_idx : end_idx + 1]
+        try:
+            return json.loads(potential_json)
+        except json.JSONDecodeError:
+            pass
+    
+    return None
+
+
+def validate_structured_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate and normalize a structured VLM response.
+    
+    Ensures all expected fields exist with appropriate defaults.
+    
+    Args:
+        data: Parsed JSON response from VLM
+        
+    Returns:
+        Normalized response with all required fields
+    """
+    return {
+        "title": data.get("title", "Untitled"),
+        "summary": data.get("summary", ""),
+        "bullets": data.get("bullets", []),
+        "tags": data.get("tags", []),
+        "entities": data.get("entities", []),
+    }
 
 
 class MLXProcessor:
@@ -221,6 +312,42 @@ class MLXProcessor:
         except Exception as e:
             self._log(f"Error loading image from {image_path}: {e}")
             return None, {"error": str(e)}
+    
+    def process_image_structured(
+        self, image: Image.Image, prompt: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """
+        Process an image and return structured JSON output.
+        
+        Args:
+            image: PIL Image to process
+            prompt: Text prompt that instructs the model to return JSON
+            
+        Returns:
+            Tuple of (structured_data dict, stats dict) or (None, stats) if failed
+        """
+        raw_text, stats = self.process_image(image, prompt)
+        
+        if raw_text is None:
+            return None, stats
+        
+        # Add raw response to stats for debugging
+        if stats:
+            stats["raw_response"] = raw_text
+        
+        # Parse JSON from response
+        parsed = parse_vlm_json_response(raw_text)
+        
+        if parsed is None:
+            self._log(f"Failed to parse JSON from response: {raw_text[:200]}...")
+            if stats:
+                stats["parse_error"] = "Failed to extract valid JSON from response"
+            return None, stats
+        
+        # Validate and normalize the response
+        structured = validate_structured_response(parsed)
+        
+        return structured, stats
     
     def should_keep_loaded(self, queue_has_items: bool, on_battery: bool) -> bool:
         """

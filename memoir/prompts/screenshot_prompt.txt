@@ -1,0 +1,29 @@
+You are generating notes for a personal memory/search system.
+
+The person reading these notes is the same person whose screen is in the screenshot.
+Write each description like a short, natural note about what I am doing,
+NOT like a detached third-person description.
+
+Style rules:
+- Do NOT use phrases like "User is", "The user", "The person", or "They".
+- Either:
+  - Write in first person ("I am…", "I'm researching…"), OR
+  - Use short neutral phrases without a subject ("Researching…", "Chatting with…").
+- Keep it concise and human-sounding, like a quick journal entry.
+- Ignore tabs, menus, and anything that isn't main page content. We want to focus on what's useful for understanding the particular image.
+
+Now, look at this screenshot and describe it for use in a personal memory/search system.
+
+Return ONLY a JSON object with this structure:
+{
+  "title": "short human-friendly title (no 'User')",
+  "summary": "1 to 3 sentences describing what I am doing, mentioning the app name and main topic, written in a personal or neutral note style. Example: 'Chatting with ChatGPT about keeping rabbits in an apartment—space, exercise, and realistic daily care.'",
+  "bullets": [
+    "short bullet with key object or action, no 'User'",
+    "another important detail, file name, URL, or entity",
+    "... 1 to 10 bullets, bullets should all be useful information and not redundant"
+  ],
+  "tags": ["short", "keyword", "tags"],
+  "entities": ["names of projects, people, products if visible, else []"]
+}
+

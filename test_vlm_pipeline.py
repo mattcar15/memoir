@@ -64,7 +64,7 @@ def main():
             print(f"Processing Method: {result['processing_method']}")
             print(f"Summary: {result['summary'][:100]}...")
             print(f"Total Time: {result['total_processing_time_seconds']:.2f}s")
-            if result.get('vlm_stats'):
+            if result.get("vlm_stats"):
                 print(f"VLM Stats: {result['vlm_stats']}")
             print("=" * 70)
             return 0
@@ -76,11 +76,10 @@ def main():
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

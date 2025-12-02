@@ -23,7 +23,11 @@ CAPTURE_STAGING_DIR = _PROJECT_ROOT / "logs" / "staging"
 # MLX model configuration
 MLX_MODEL_NAME = "lmstudio-community/Qwen3-VL-2B-Instruct-MLX-8bit"
 MLX_MAX_IMAGE_SIDE = 1024
-MLX_MAX_NEW_TOKENS = 128
+MLX_MAX_NEW_TOKENS = 512  # Increased for structured JSON responses
+
+# Prompt configuration
+_PROMPTS_DIR = Path(__file__).parent / "prompts"
+SCREENSHOT_PROMPT_PATH = _PROMPTS_DIR / "screenshot_prompt.txt"
 
 # Window monitoring and deduplication
 PHASH_THRESHOLD_PER_TAB = 10
