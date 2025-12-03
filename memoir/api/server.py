@@ -34,6 +34,7 @@ from ..storage.database import (
     create_session,
 )
 from ..storage import repository
+from . import search as search_module
 
 
 # Global state for the app
@@ -97,6 +98,18 @@ def create_app(
         allow_headers=["*"],
     )
 
+    # Configure and include the unified search router
+    from ..storage.search_index import get_search_index_collection_name
+    import chromadb
+    
+    # Get or create the search index collection
+    search_collection = vector_store.client.get_or_create_collection(
+        name=get_search_index_collection_name(),
+        metadata={"description": "Unified search index for hybrid BM25 + vector search"},
+    )
+    search_module.configure_search(search_collection, embedding_model)
+    app.include_router(search_module.router)
+
     @app.get("/")
     async def root():
         """Root endpoint with API information."""
@@ -107,6 +120,10 @@ def create_app(
             "endpoints": {
                 "health": "/health",
                 "me": "/me",
+                "search": "/search (unified hybrid search)",
+                "search_suggest": "/search/suggest",
+                "search_similar": "/search/similar",
+                "search_stats": "/search/stats",
                 "snapshots_range": "/snapshots/range",
                 "snapshots_search": "/snapshots/search",
                 "memories_search": "/memories/search",

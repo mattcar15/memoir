@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Episode, Snapshot, Memory
+from .models import Base, Episode, Snapshot, Memory, SearchIndex
 
 # Default database filename
 DEFAULT_DB_NAME = "memoir.db"
@@ -175,9 +175,9 @@ def init_database(
 
 
 def _create_fts_tables(engine: Engine) -> None:
-    """Create FTS5 virtual table for full-text search."""
+    """Create FTS5 virtual tables for full-text search."""
     with engine.connect() as conn:
-        # Check if FTS table already exists
+        # === memories_fts (for Memory table) ===
         result = conn.execute(
             text(
                 """
@@ -186,58 +186,115 @@ def _create_fts_tables(engine: Engine) -> None:
         """
             )
         )
-        if result.fetchone() is not None:
-            return  # Already exists
+        if result.fetchone() is None:
+            try:
+                conn.execute(
+                    text(
+                        """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                        search_text,
+                        content='memories',
+                        content_rowid='rowid'
+                    )
+                """
+                    )
+                )
 
-        try:
-            # Create FTS5 virtual table
-            conn.execute(
-                text(
-                    """
-                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                    search_text,
-                    content='memories',
-                    content_rowid='rowid'
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                        INSERT INTO memories_fts(rowid, search_text) VALUES (NEW.rowid, NEW.search_text);
+                    END
+                """
+                    )
                 )
-            """
+
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, search_text) VALUES('delete', OLD.rowid, OLD.search_text);
+                    END
+                """
+                    )
                 )
+
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, search_text) VALUES('delete', OLD.rowid, OLD.search_text);
+                        INSERT INTO memories_fts(rowid, search_text) VALUES (NEW.rowid, NEW.search_text);
+                    END
+                """
+                    )
+                )
+            except Exception as e:
+                print(f"Warning: Could not create memories_fts: {e}")
+
+        # === search_index_fts (for SearchIndex table) ===
+        result = conn.execute(
+            text(
+                """
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='search_index_fts'
+        """
             )
-
-            # Create triggers to keep FTS in sync
-            conn.execute(
-                text(
-                    """
-                CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                    INSERT INTO memories_fts(rowid, search_text) VALUES (NEW.rowid, NEW.search_text);
-                END
-            """
+        )
+        if result.fetchone() is None:
+            try:
+                conn.execute(
+                    text(
+                        """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS search_index_fts USING fts5(
+                        search_text,
+                        title,
+                        content='search_index',
+                        content_rowid='rowid'
+                    )
+                """
+                    )
                 )
-            )
 
-            conn.execute(
-                text(
-                    """
-                CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, search_text) VALUES('delete', OLD.rowid, OLD.search_text);
-                END
-            """
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS search_index_ai AFTER INSERT ON search_index BEGIN
+                        INSERT INTO search_index_fts(rowid, search_text, title)
+                        VALUES (NEW.rowid, NEW.search_text, NEW.title);
+                    END
+                """
+                    )
                 )
-            )
 
-            conn.execute(
-                text(
-                    """
-                CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, search_text) VALUES('delete', OLD.rowid, OLD.search_text);
-                    INSERT INTO memories_fts(rowid, search_text) VALUES (NEW.rowid, NEW.search_text);
-                END
-            """
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS search_index_ad AFTER DELETE ON search_index BEGIN
+                        INSERT INTO search_index_fts(search_index_fts, rowid, search_text, title)
+                        VALUES('delete', OLD.rowid, OLD.search_text, OLD.title);
+                    END
+                """
+                    )
                 )
-            )
 
-            conn.commit()
-        except Exception as e:
-            print(f"Warning: Could not create FTS5 table: {e}")
+                conn.execute(
+                    text(
+                        """
+                    CREATE TRIGGER IF NOT EXISTS search_index_au AFTER UPDATE ON search_index BEGIN
+                        INSERT INTO search_index_fts(search_index_fts, rowid, search_text, title)
+                        VALUES('delete', OLD.rowid, OLD.search_text, OLD.title);
+                        INSERT INTO search_index_fts(rowid, search_text, title)
+                        VALUES (NEW.rowid, NEW.search_text, NEW.title);
+                    END
+                """
+                    )
+                )
+            except Exception as e:
+                print(f"Warning: Could not create search_index_fts: {e}")
+
+        conn.commit()
 
 
 # =============================================================================
@@ -251,6 +308,7 @@ def get_table_counts(session: Session) -> dict[str, int]:
         "episodes": session.query(Episode).count(),
         "snapshots": session.query(Snapshot).count(),
         "memories": session.query(Memory).count(),
+        "search_index": session.query(SearchIndex).count(),
     }
 
 

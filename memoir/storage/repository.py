@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from chromadb import Collection
 
-from .models import Episode, Memory, Snapshot, now_ms
+from .models import Episode, Memory, Snapshot, SearchIndex, now_ms
 
 
 # =============================================================================
@@ -30,12 +30,13 @@ def upsert_memory_record(
     embedding: list[float],
     snapshot: Optional[Snapshot] = None,
     episode: Optional[Episode] = None,
+    index_for_search: bool = True,
 ) -> None:
     """
-    Atomic upsert to SQLite + Chroma.
+    Atomic upsert to SQLite + Chroma + SearchIndex.
 
     This is the ONLY function that should write to both databases.
-    It ensures SQLite and Chroma stay in lockstep.
+    It ensures SQLite, Chroma, and SearchIndex stay in lockstep.
 
     Args:
         session: SQLAlchemy session
@@ -44,6 +45,7 @@ def upsert_memory_record(
         embedding: Embedding vector for the memory's search_text
         snapshot: Optional Snapshot to upsert (for snapshot-level memories)
         episode: Optional Episode to upsert
+        index_for_search: Whether to also update the unified search index
     """
     # 1. Upsert episode if provided
     if episode:
@@ -59,8 +61,13 @@ def upsert_memory_record(
     # Flush to ensure IDs are available
     session.flush()
 
-    # 4. Upsert into Chroma
+    # 4. Upsert into Chroma (legacy collection)
     _upsert_chroma(chroma_collection, memory, embedding, snapshot)
+
+    # 5. Update unified search index
+    if index_for_search:
+        from .search_index import index_memory
+        index_memory(session, memory, snapshot, chroma_collection, embedding)
 
 
 def _upsert_episode(session: Session, episode: Episode) -> None:

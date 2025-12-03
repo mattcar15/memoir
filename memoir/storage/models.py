@@ -418,3 +418,133 @@ def memory_from_dict(data: dict[str, Any]) -> Memory:
     memory.tags = tags
     memory.entities = entities
     return memory
+
+
+# =============================================================================
+# SearchIndex Model - Unified Search Index
+# =============================================================================
+
+
+class SearchIndex(Base):
+    """
+    Unified search index for hybrid BM25 + vector search.
+    
+    Indexes searchable text from snapshots, episodes, and memories
+    into a single table for unified search results.
+    
+    Entity types:
+    - 'snapshot': OCR text + window_title + app
+    - 'episode': title + summary + tags
+    - 'memory': title + summary + bullets + tags + entities
+    """
+
+    __tablename__ = "search_index"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(16), nullable=False)  # 'snapshot', 'episode', 'memory'
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    search_text: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    
+    # Denormalized fields for filtering
+    captured_at: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)  # unix ms
+    app: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    
+    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+    updated_at: Mapped[int] = mapped_column(BigInteger, default=now_ms, onupdate=now_ms)
+
+    __table_args__ = (
+        Index("idx_search_index_type", "entity_type"),
+        Index("idx_search_index_entity", "entity_type", "entity_id", unique=True),
+        Index("idx_search_index_captured", "captured_at"),
+        Index("idx_search_index_app", "app"),
+        CheckConstraint(
+            "entity_type IN ('snapshot', 'episode', 'memory')",
+            name="ck_search_index_type"
+        ),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "search_text": self.search_text,
+            "title": self.title,
+            "captured_at": self.captured_at,
+            "app": self.app,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @staticmethod
+    def build_snapshot_search_text(snapshot: Snapshot) -> str:
+        """Build search text from a snapshot."""
+        parts = []
+        if snapshot.ocr_text:
+            parts.append(snapshot.ocr_text)
+        if snapshot.window_title:
+            parts.append(snapshot.window_title)
+        if snapshot.app:
+            parts.append(snapshot.app)
+        return " ".join(filter(None, parts))
+
+    @staticmethod
+    def build_episode_search_text(episode: Episode) -> str:
+        """Build search text from an episode."""
+        parts = []
+        if episode.title:
+            parts.append(episode.title)
+        if episode.summary:
+            parts.append(episode.summary)
+        parts.extend(episode.tags)
+        return " ".join(filter(None, parts))
+
+    @staticmethod
+    def from_snapshot(snapshot: Snapshot) -> "SearchIndex":
+        """Create a SearchIndex entry from a Snapshot."""
+        return SearchIndex(
+            id=f"si_snap_{snapshot.id}",
+            entity_type="snapshot",
+            entity_id=snapshot.id,
+            search_text=SearchIndex.build_snapshot_search_text(snapshot),
+            title=snapshot.window_title,
+            captured_at=snapshot.captured_at,
+            app=snapshot.app,
+        )
+
+    @staticmethod
+    def from_episode(episode: Episode) -> "SearchIndex":
+        """Create a SearchIndex entry from an Episode."""
+        return SearchIndex(
+            id=f"si_ep_{episode.id}",
+            entity_type="episode",
+            entity_id=episode.id,
+            search_text=SearchIndex.build_episode_search_text(episode),
+            title=episode.title,
+            captured_at=episode.started_at,
+            app=None,
+        )
+
+    @staticmethod
+    def from_memory(memory: Memory, snapshot: Optional[Snapshot] = None) -> "SearchIndex":
+        """Create a SearchIndex entry from a Memory."""
+        captured_at = None
+        app = None
+        if snapshot:
+            captured_at = snapshot.captured_at
+            app = snapshot.app
+        
+        return SearchIndex(
+            id=f"si_mem_{memory.id}",
+            entity_type="memory",
+            entity_id=memory.id,
+            search_text=memory.search_text,
+            title=memory.title,
+            captured_at=captured_at,
+            app=app,
+        )
+
+    def __repr__(self) -> str:
+        return f"<SearchIndex(id={self.id!r}, type={self.entity_type!r}, title={self.title!r})>"

@@ -15,10 +15,13 @@ from .models import (
     Episode,
     Snapshot,
     Memory,
+    SearchIndex,
     episode_from_dict,
     snapshot_from_dict,
     memory_from_dict,
 )
+from . import search_index
+from . import hybrid_search
 from .database import (
     init_database,
     get_session,
@@ -69,9 +72,13 @@ __all__ = [
     "Episode",
     "Snapshot",
     "Memory",
+    "SearchIndex",
     "episode_from_dict",
     "snapshot_from_dict",
     "memory_from_dict",
+    # Search
+    "search_index",
+    "hybrid_search",
     # Database
     "init_database",
     "get_session",

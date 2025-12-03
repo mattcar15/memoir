@@ -174,18 +174,39 @@ def import_from_results_file(
     for result in pbar:
         try:
             # Extract data from result
-            summary = result.get("summary")
             source_file = result.get("source_file")
             vlm_stats = result.get("vlm_stats", {})
             result_timestamp = result.get("timestamp")
 
-            # Extract new structured fields
+            if not source_file:
+                skipped += 1
+                continue
+
+            # Try to parse structured data from raw_response JSON
             title = result.get("title")
+            summary = result.get("summary")
             bullets = result.get("bullets", [])
             tags = result.get("tags", [])
             entities = result.get("entities", [])
 
-            if not summary or not source_file:
+            # If not at top level, try to parse from vlm_stats.raw_response
+            raw_response = vlm_stats.get("raw_response", "")
+            if raw_response and (not summary or not title):
+                try:
+                    parsed = json.loads(raw_response)
+                    title = title or parsed.get("title")
+                    summary = summary or parsed.get("summary")
+                    bullets = bullets or parsed.get("bullets", [])
+                    tags = tags or parsed.get("tags", [])
+                    entities = entities or parsed.get("entities", [])
+                except json.JSONDecodeError as e:
+                    tqdm.write(
+                        f"⚠️  Invalid JSON in raw_response for {source_file}: {e}"
+                    )
+                    errors += 1
+                    continue
+
+            if not summary:
                 skipped += 1
                 continue
 
